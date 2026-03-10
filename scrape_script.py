@@ -5,7 +5,8 @@ import re
 import shutil
 from playwright.sync_api import sync_playwright
 
-def scrape_with_deep_verification(limit=10):
+def scrape_rimi_direct_check(limit=10):
+    # --- 1. CLEAN SLATE ---
     if os.path.exists('data'):
         shutil.rmtree('data')
     os.makedirs('data/Selver', exist_ok=True)
@@ -19,7 +20,7 @@ def scrape_with_deep_verification(limit=10):
         )
         page = context.new_page()
 
-        # --- STEP 1: SELVER (KEEPING YOUR WORKING LOGIC) ---
+        # --- STEP 1: SELVER (KEEPING YOUR WORKING CODE) ---
         print("\n--- [START] Processing Selver ---")
         try:
             page.goto("https://adstransparency.google.com/advertiser/AR08638735883022893057?region=EE&preset-date=Last+30+days", wait_until="networkidle")
@@ -36,15 +37,18 @@ def scrape_with_deep_verification(limit=10):
                         print(f"  [SAVED] Selver: {cr_id}")
         except Exception as e: print(f"  [ERROR] Selver: {e}")
 
-        # --- STEP 2: RIMI (DEEP LINK VERIFICATION) ---
-        print("\n--- [START] Processing Rimi ---")
+        # --- STEP 2: RIMI (ELEMENT-BASED DEEP VERIFICATION) ---
+        print("\n--- [START] Processing Rimi (Deep Element Check) ---")
         try:
             page.goto("https://adstransparency.google.com/?region=EE&domain=rimi.ee", wait_until="networkidle")
             page.wait_for_selector("creative-preview", timeout=20000)
+            
+            # Scroll a bit to load more than 4 cards (Standard Google Grid behavior)
+            page.keyboard.press("End")
             time.sleep(5)
             
             ads = page.locator("creative-preview").all()
-            print(f"  [LOG] Found {len(ads)} total cards. Starting Deep Verification...")
+            print(f"  [LOG] Found {len(ads)} ads on grid. Checking details for Media House OÜ...")
 
             processed = 0
             for i, ad in enumerate(ads):
@@ -55,22 +59,19 @@ def scrape_with_deep_verification(limit=10):
                 
                 href = link_el.get_attribute("href")
                 cr_id = re.search(r"(CR\d+)", href).group(1)
-                
-                # We open the "Creative Detail" URL to confirm the advertiser
                 detail_url = f"https://adstransparency.google.com{href}"
                 
-                # Check if this specific CR belongs to Media House
-                # We use a secondary page object to keep our place in the grid
+                # Create a new tab to check the detail page
                 check_page = context.new_page()
                 try:
                     check_page.goto(detail_url, wait_until="domcontentloaded", timeout=30000)
-                    # Check for the aria-label you found in the snippet
-                    is_media_house = check_page.locator("a[aria-label*='Media House OÜ']").count() > 0
+                    # Check for the specific 'advertiser-title' snippet you sent
+                    # We look for the text "Media House OÜ" within that specific class
+                    title_locator = check_page.locator(".advertiser-title:has-text('Media House OÜ')")
                     
-                    if is_media_house:
-                        print(f"  [VERIFIED] Card {i+1} ({cr_id}) belongs to Media House.")
+                    if title_locator.count() > 0:
+                        print(f"  [MATCH] Card {i+1} ({cr_id}) verified as Media House.")
                         
-                        # Go back to the main page to grab the image/screenshot
                         save_path = f"data/Rimi/{cr_id}.png"
                         img_el = ad.locator("html-renderer img").first
                         
@@ -78,22 +79,23 @@ def scrape_with_deep_verification(limit=10):
                             src = img_el.get_attribute("src")
                             img_data = requests.get(src).content
                             with open(save_path, "wb") as f: f.write(img_data)
-                            print(f"    -> Saved Image")
+                            print(f"    -> Image Saved")
                         else:
                             ad.screenshot(path=save_path)
-                            print(f"    -> Saved Screenshot (Video/Dynamic)")
+                            print(f"    -> Video/Complex Ad Saved via Screenshot")
                         
                         processed += 1
                     else:
                         print(f"  [SKIP] Card {i+1} ({cr_id}) belongs to another advertiser.")
-                
+                except Exception as inner_e:
+                    print(f"    [WARN] Could not verify {cr_id}: {inner_e}")
                 finally:
                     check_page.close()
 
         except Exception as e:
-            print(f"  [ERROR] Rimi Deep-Scan: {e}")
+            print(f"  [ERROR] Rimi: {e}")
 
         browser.close()
 
 if __name__ == "__main__":
-    scrape_with_deep_verification(limit=10)
+    scrape_rimi_direct_check(limit=10)
