@@ -11,25 +11,21 @@ def run_full_competitor_scraper():
             os.makedirs(folder, exist_ok=True)
 
     with sync_playwright() as p:
-        # headless=True for GitHub Runners/Servers; change to False to watch it locally
-        browser = p.chromium.launch(headless=True) 
+        browser = p.chromium.launch(headless=False) 
         context = browser.new_context(viewport={'width': 1920, 'height': 1080})
         page = context.new_page()
 
-        # --- SECTION 1: SELVER (STABLE) ---
+        # --- SECTION 1: SELVER ---
         print("\n--- [START] Processing Selver ---")
         try:
             page.goto("https://adstransparency.google.com/advertiser/AR08638735883022893057?region=EE", wait_until="domcontentloaded")
-            page.wait_for_selector("creative-preview", timeout=10000)
-            
-            # Scroll to load ads
+            time.sleep(2)
             for _ in range(5):
                 page.evaluate("window.scrollBy(0, 2000)")
-                time.sleep(1)
+                time.sleep(0.5)
 
             selver_ads = page.locator("creative-preview").all()
-            print(f"  [LOG] Found {len(selver_ads)} Selver ads. Saving...")
-            
+            print(f"  [LOG] Found {len(selver_ads)} Selver ads.")
             for ad in selver_ads:
                 try:
                     href = ad.locator("a").first.get_attribute("href")
@@ -42,27 +38,24 @@ def run_full_competitor_scraper():
                                 f.write(requests.get(src).content)
                 except: continue
         except Exception as e:
-            print(f"  [ERROR] Selver section failed: {e}")
+            print(f"  [ERROR] Selver failed: {e}")
 
-        # --- SECTION 2: RIMI (INNER_TEXT DIAGNOSTIC) ---
+        # --- SECTION 2: RIMI (DEEP DIAGNOSTIC) ---
         print("\n--- [START] Processing Rimi ---")
         try:
             page.goto("https://adstransparency.google.com/?region=EE&domain=rimi.ee", wait_until="load")
-            time.sleep(3)
+            time.sleep(4)
 
-            # Click "See all ads" if it appears
             expand_btn = page.locator('button:has-text("See all ads"), material-button:has-text("See all ads")')
             if expand_btn.count() > 0:
                 print("  [ACTION] Clicking 'See all ads'...")
                 expand_btn.first.click()
-                time.sleep(4)
+                time.sleep(5)
 
-            # Deep scroll to populate the grid (80 scrolls as requested)
-            print("  [ACTION] Scrolling 80 times to load Media House / Rimi ads...")
+            print("  [ACTION] Scrolling 80 times...")
             for i in range(80):
                 page.evaluate("window.scrollBy(0, 1500)")
-                if i % 20 == 0:
-                    time.sleep(1)
+                if i % 20 == 0: time.sleep(1)
 
             grid_items = page.locator("creative-preview").all()
             print(f"  [LOG] Scanning {len(grid_items)} grid items...")
@@ -70,37 +63,41 @@ def run_full_competitor_scraper():
             rimi_count = 0
             seen_ids = set()
 
-            for item in grid_items:
+            for idx, item in enumerate(grid_items):
                 try:
-                    # Looking for "Media House" anywhere in the item text
-                    if "Media House" in item.inner_text():
-                        href_el = item.locator("a").first
-                        href = href_el.get_attribute("href")
+                    # DIAGNOSTIC: Get text via multiple methods to catch hidden text
+                    text_content = item.text_content() or ""
+                    inner_text = item.inner_text() or ""
+                    
+                    # Log the first 10 items regardless, then only every 50th or matches
+                    if idx < 10 or "Media House" in text_content or "Media House" in inner_text:
+                        clean_text = inner_text.replace('\n', ' ').strip()[:50]
+                        print(f"  [ITEM {idx}] Detected Text: [{clean_text}...]")
+
+                    if "Media House" in text_content or "Media House" in inner_text:
+                        href = item.locator("a").first.get_attribute("href")
                         cr_id = re.search(r"(CR\d+)", href).group(1)
                         
-                        if cr_id in seen_ids: continue
-                        seen_ids.add(cr_id)
-                        
-                        save_path = f"data/Rimi/{cr_id}.png"
-                        
-                        # Try to find the image tag for high quality
-                        img_tag = item.locator("html-renderer img, fletch-renderer img").first
-                        if img_tag.count() > 0:
-                            img_url = img_tag.get_attribute("src")
-                            if img_url and img_url.startswith("http"):
+                        if cr_id not in seen_ids:
+                            seen_ids.add(cr_id)
+                            save_path = f"data/Rimi/{cr_id}.png"
+                            
+                            # Use the img src we saw in your HTML snippet
+                            img_tag = item.locator("img").first
+                            if img_tag.count() > 0 and img_tag.get_attribute("src"):
+                                img_url = img_tag.get_attribute("src")
                                 with open(save_path, "wb") as f:
                                     f.write(requests.get(img_url).content)
+                                print(f"    -> [MATCH] Saved via Image URL: {cr_id}")
                             else:
                                 item.screenshot(path=save_path)
-                        else:
-                            # Screenshot bounding box fallback
-                            item.locator(".creative-bounding-box").first.screenshot(path=save_path)
-                        
-                        rimi_count += 1
-                except:
+                                print(f"    -> [MATCH] Saved via Screenshot: {cr_id}")
+                            
+                            rimi_count += 1
+                except Exception as e:
                     continue
         except Exception as e:
-            print(f"  [ERROR] Rimi section failed: {e}")
+            print(f"  [ERROR] Rimi failed: {e}")
 
         browser.close()
         print(f"\n--- [COMPLETED] ---")
