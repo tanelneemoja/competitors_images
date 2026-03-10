@@ -68,34 +68,42 @@ def run_unlimited_scraper():
         rimi_count = 0
         seen_ids = set()
 
-        for item in grid_items:
-            try:
-                # Get Advertiser Name from the grid div we identified
-                name_div = item.locator(".advertiser-name")
-                name_text = name_div.inner_text().strip() if name_div.count() > 0 else ""
-
-                if "Media House" in name_text:
-                    href = item.locator("a").first.get_attribute("href")
-                    cr_id = re.search(r"(CR\d+)", href).group(1)
-                    
-                    if cr_id in seen_ids: continue
-                    seen_ids.add(cr_id)
-                    
-                    save_path = f"data/Rimi/{cr_id}.png"
-                    
-                    # Try to get the direct image first for better quality
-                    img_tag = item.locator("html-renderer img, fletch-renderer img").first
-                    if img_tag.count() > 0:
-                        img_url = img_tag.get_attribute("src")
-                        if img_url and img_url.startswith("http"):
-                            with open(save_path, "wb") as f:
-                                f.write(requests.get(img_url).content)
-                        else:
-                            item.screenshot(path=save_path)
-                    else:
-                        item.screenshot(path=save_path)
-                    
-                    rimi_count += 1
+        # --- REFINED RIMI GRID LOGIC ---
+for item in grid_items:
+    try:
+        # 1. Grab all text inside the creative-preview block
+        # This will include "Media House OÜ" and "Verified"
+        full_card_text = item.inner_text()
+        
+        if "Media House" in full_card_text:
+            # 2. Extract the CR_ID from the href in the <a> tag
+            href_element = item.locator("a").first
+            href = href_element.get_attribute("href")
+            cr_id = re.search(r"(CR\d+)", href).group(1)
+            
+            if cr_id in seen_ids: continue
+            seen_ids.add(cr_id)
+            
+            # 3. Target the specific Rimi image container you found
+            # Your HTML shows it's inside 'html-renderer img'
+            img_tag = item.locator("html-renderer img").first
+            save_path = f"data/Rimi/{cr_id}.png"
+            
+            if img_tag.count() > 0:
+                img_url = img_tag.get_attribute("src")
+                # Direct download is faster and higher quality than a screenshot
+                if img_url and img_url.startswith("http"):
+                    response = requests.get(img_url, timeout=10)
+                    with open(save_path, "wb") as f:
+                        f.write(response.content)
+                    print(f"  [SAVED] Rimi Image: {cr_id}")
+                else:
+                    item.screenshot(path=save_path)
+            else:
+                # Fallback to screenshotting the bounding box if img is missing
+                item.locator(".creative-bounding-box").first.screenshot(path=save_path)
+            
+            rimi_count += 1
             except:
                 continue
 
