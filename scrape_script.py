@@ -5,8 +5,7 @@ import re
 import shutil
 from playwright.sync_api import sync_playwright
 
-def scrape_rimi_direct_check(limit=10):
-    # --- 1. CLEAN SLATE ---
+def scrape_rimi_with_scrolling(limit=10):
     if os.path.exists('data'):
         shutil.rmtree('data')
     os.makedirs('data/Selver', exist_ok=True)
@@ -20,7 +19,7 @@ def scrape_rimi_direct_check(limit=10):
         )
         page = context.new_page()
 
-        # --- STEP 1: SELVER (KEEPING YOUR WORKING CODE) ---
+        # --- STEP 1: SELVER (STABLE) ---
         print("\n--- [START] Processing Selver ---")
         try:
             page.goto("https://adstransparency.google.com/advertiser/AR08638735883022893057?region=EE&preset-date=Last+30+days", wait_until="networkidle")
@@ -37,18 +36,20 @@ def scrape_rimi_direct_check(limit=10):
                         print(f"  [SAVED] Selver: {cr_id}")
         except Exception as e: print(f"  [ERROR] Selver: {e}")
 
-        # --- STEP 2: RIMI (ELEMENT-BASED DEEP VERIFICATION) ---
-        print("\n--- [START] Processing Rimi (Deep Element Check) ---")
+        # --- STEP 2: RIMI (SCROLLING + DEEP CHECK) ---
+        print("\n--- [START] Processing Rimi (Scrolling Mode) ---")
         try:
             page.goto("https://adstransparency.google.com/?region=EE&domain=rimi.ee", wait_until="networkidle")
             page.wait_for_selector("creative-preview", timeout=20000)
             
-            # Scroll a bit to load more than 4 cards (Standard Google Grid behavior)
-            page.keyboard.press("End")
-            time.sleep(5)
+            # SCROLLING LOOP: Scroll multiple times to force Google to load the 600 ads
+            print("  [LOG] Scrolling to reveal more ads...")
+            for _ in range(10): # Scroll 10 times
+                page.mouse.wheel(0, 2000)
+                time.sleep(2)
             
             ads = page.locator("creative-preview").all()
-            print(f"  [LOG] Found {len(ads)} ads on grid. Checking details for Media House OÜ...")
+            print(f"  [LOG] After scrolling, found {len(ads)} ads. Verifying Media House OÜ...")
 
             processed = 0
             for i, ad in enumerate(ads):
@@ -61,17 +62,15 @@ def scrape_rimi_direct_check(limit=10):
                 cr_id = re.search(r"(CR\d+)", href).group(1)
                 detail_url = f"https://adstransparency.google.com{href}"
                 
-                # Create a new tab to check the detail page
+                # Verify in a new tab
                 check_page = context.new_page()
                 try:
                     check_page.goto(detail_url, wait_until="domcontentloaded", timeout=30000)
-                    # Check for the specific 'advertiser-title' snippet you sent
-                    # We look for the text "Media House OÜ" within that specific class
-                    title_locator = check_page.locator(".advertiser-title:has-text('Media House OÜ')")
+                    # Using the advertiser-title logic from your snippet
+                    is_media = check_page.locator(".advertiser-title:has-text('Media House OÜ')").count() > 0
                     
-                    if title_locator.count() > 0:
-                        print(f"  [MATCH] Card {i+1} ({cr_id}) verified as Media House.")
-                        
+                    if is_media:
+                        print(f"  [MATCH] Card {i+1} ({cr_id}) is Rimi/Media House.")
                         save_path = f"data/Rimi/{cr_id}.png"
                         img_el = ad.locator("html-renderer img").first
                         
@@ -82,20 +81,18 @@ def scrape_rimi_direct_check(limit=10):
                             print(f"    -> Image Saved")
                         else:
                             ad.screenshot(path=save_path)
-                            print(f"    -> Video/Complex Ad Saved via Screenshot")
-                        
+                            print(f"    -> Screenshot Saved")
                         processed += 1
                     else:
-                        print(f"  [SKIP] Card {i+1} ({cr_id}) belongs to another advertiser.")
-                except Exception as inner_e:
-                    print(f"    [WARN] Could not verify {cr_id}: {inner_e}")
-                finally:
-                    check_page.close()
+                        # Optional log to see what it skips
+                        # print(f"  [SKIP] Card {i+1} ({cr_id})")
+                        pass
+                except: continue
+                finally: check_page.close()
 
-        except Exception as e:
-            print(f"  [ERROR] Rimi: {e}")
+        except Exception as e: print(f"  [ERROR] Rimi: {e}")
 
         browser.close()
 
 if __name__ == "__main__":
-    scrape_rimi_direct_check(limit=10)
+    scrape_rimi_with_scrolling(limit=10)
