@@ -4,32 +4,51 @@ import time
 import re
 from playwright.sync_api import sync_playwright
 
-def run_grid_name_scraper(limit=15):
-    if not os.path.exists('data/Rimi'): os.makedirs('data/Rimi', exist_ok=True)
-    if not os.path.exists('data/Selver'): os.makedirs('data/Selver', exist_ok=True)
+def run_unlimited_scraper():
+    # Setup storage
+    for folder in ['data/Selver', 'data/Rimi']:
+        if not os.path.exists(folder): os.makedirs(folder, exist_ok=True)
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(viewport={'width': 1920, 'height': 1080})
         page = context.new_page()
 
-        # --- SECTION 1: SELVER (STABLE) ---
-        print("\n--- [START] Processing Selver ---")
+        # --- SECTION 1: SELVER (UNLIMITED) ---
+        print("\n--- [START] Processing Selver (Full Scan) ---")
         page.goto("https://adstransparency.google.com/advertiser/AR08638735883022893057?region=EE", wait_until="domcontentloaded")
+        
+        # Scroll to the bottom of Selver's portfolio
+        print("  [ACTION] Scrolling to load all Selver ads...")
+        last_height = page.evaluate("document.body.scrollHeight")
+        while True:
+            page.evaluate("window.scrollBy(0, 2000)")
+            time.sleep(1)
+            new_height = page.evaluate("document.body.scrollHeight")
+            if new_height == last_height: break
+            last_height = new_height
+
         selver_ads = page.locator("creative-preview").all()
-        for ad in selver_ads[:10]:
+        print(f"  [LOG] Found {len(selver_ads)} total Selver ads. Saving...")
+        
+        for ad in selver_ads:
             try:
                 href = ad.locator("a").first.get_attribute("href")
                 cr_id = re.search(r"(CR\d+)", href).group(1)
-                print(f"  [SAVED] Selver: {cr_id}")
+                img = ad.locator("img").first
+                if img.count() > 0:
+                    src = img.get_attribute("src")
+                    if src and src.startswith("http"):
+                        with open(f"data/Selver/{cr_id}.png", "wb") as f:
+                            f.write(requests.get(src).content)
+                # print(f"  [SAVED] Selver: {cr_id}") # Optional: uncomment if you want to see every ID
             except: continue
 
-        # --- SECTION 2: RIMI (GRID-BASED NAME SEARCH) ---
-        print("\n--- [START] Processing Rimi ---")
+        # --- SECTION 2: RIMI (UNLIMITED GRID SCAN) ---
+        print("\n--- [START] Processing Rimi (Full Scan) ---")
         page.goto("https://adstransparency.google.com/?region=EE&domain=rimi.ee", wait_until="load")
         
-        # 1. Expand the grid
-        print("  [ACTION] Expanding grid...")
+        # Expand the grid if button exists
         try:
             expand_btn = page.get_by_role("button", name=re.compile("See all ads", re.IGNORECASE))
             if expand_btn.count() > 0:
@@ -37,49 +56,53 @@ def run_grid_name_scraper(limit=15):
                 time.sleep(3)
         except: pass
 
-        # 2. Heavy Scroll to force 'advertiser-name' to render
-        print("  [ACTION] Scrolling 80 times to load names...")
+        # Deep scroll for Rimi (80 scrolls as requested to ensure lazy load)
+        print("  [ACTION] Scrolling 80 times to load all Media House / Rimi ads...")
         for i in range(80):
-            page.evaluate("window.scrollBy(0, 1000)")
-            if i % 20 == 0:
-                time.sleep(1) # Breathe every 20 scrolls
+            page.evaluate("window.scrollBy(0, 1500)")
+            if i % 20 == 0: time.sleep(1)
 
-        # 3. Scan the grid for Media House OÜ specifically
-        # We use a broader selector because the 'ymd-37' part changes
         grid_items = page.locator("creative-preview").all()
-        print(f"  [LOG] Scanning {len(grid_items)} grid items for 'Media House OÜ'...")
+        print(f"  [LOG] Scanning {len(grid_items)} grid items for Media House...")
 
-        processed = 0
-        for i, item in enumerate(grid_items):
-            if processed >= limit: break
-            
+        rimi_count = 0
+        seen_ids = set()
+
+        for item in grid_items:
             try:
-                # Check the text of the advertiser name div inside this specific grid item
-                # We look for the div containing the text directly
+                # Get Advertiser Name from the grid div we identified
                 name_div = item.locator(".advertiser-name")
-                name_text = name_div.inner_text().strip() if name_div.count() > 0 else "HIDDEN"
+                name_text = name_div.inner_text().strip() if name_div.count() > 0 else ""
 
                 if "Media House" in name_text:
-                    print(f"  [MATCH] Found Media House at index {i}!")
-                    
                     href = item.locator("a").first.get_attribute("href")
                     cr_id = re.search(r"(CR\d+)", href).group(1)
                     
-                    # Capture the preview directly from the grid to save time/resources
-                    # Since we are already looking at it
+                    if cr_id in seen_ids: continue
+                    seen_ids.add(cr_id)
+                    
                     save_path = f"data/Rimi/{cr_id}.png"
-                    item.screenshot(path=save_path)
-                    print(f"    -> Saved grid preview for {cr_id}")
                     
-                    processed += 1
-                elif i < 10: # Only log the first 10 for "the fuck" diagnostic
-                    print(f"  [DEBUG] Item {i} name: [{name_text}]")
+                    # Try to get the direct image first for better quality
+                    img_tag = item.locator("html-renderer img, fletch-renderer img").first
+                    if img_tag.count() > 0:
+                        img_url = img_tag.get_attribute("src")
+                        if img_url and img_url.startswith("http"):
+                            with open(save_path, "wb") as f:
+                                f.write(requests.get(img_url).content)
+                        else:
+                            item.screenshot(path=save_path)
+                    else:
+                        item.screenshot(path=save_path)
                     
-            except Exception as e:
+                    rimi_count += 1
+            except:
                 continue
 
         browser.close()
-        print(f"\n--- [FINISHED] Total Rimi saved: {processed} ---")
+        print(f"\n--- [FINISHED] ---")
+        print(f"Total Selver Ads Saved: {len(selver_ads)}")
+        print(f"Total Rimi/Media House Ads Found: {rimi_count}")
 
 if __name__ == "__main__":
-    run_grid_name_scraper()
+    run_unlimited_scraper()
