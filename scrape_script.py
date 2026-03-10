@@ -5,7 +5,7 @@ import re
 import shutil
 from playwright.sync_api import sync_playwright
 
-def scrape_final_fix(limit=10):
+def scrape_with_detail_verification(limit=10):
     if os.path.exists('data'):
         shutil.rmtree('data')
     os.makedirs('data/Selver', exist_ok=True)
@@ -19,12 +19,11 @@ def scrape_final_fix(limit=10):
         )
         page = context.new_page()
 
-        # --- STEP 1: SELVER (Faster Load) ---
+        # --- STEP 1: SELVER (KEEPING YOUR WORKING CODE) ---
         print("\n--- [START] Processing Selver ---")
         try:
-            # Changed to domcontentloaded to avoid the 30s timeout
             page.goto("https://adstransparency.google.com/advertiser/AR08638735883022893057?region=EE&preset-date=Last+30+days", wait_until="domcontentloaded")
-            page.wait_for_selector("creative-preview", timeout=20000)
+            page.wait_for_selector("creative-preview", timeout=15000)
             ads = page.locator("creative-preview").all()
             for ad in ads[:limit]:
                 link = ad.locator("a[href*='/creative/CR']").first
@@ -37,19 +36,25 @@ def scrape_final_fix(limit=10):
                         print(f"  [SAVED] Selver: {cr_id}")
         except Exception as e: print(f"  [ERROR] Selver: {e}")
 
-        # --- STEP 2: RIMI (Aggressive Scroll + Verification) ---
+        # --- STEP 2: RIMI (DEEP ELEMENT VERIFICATION) ---
         print("\n--- [START] Processing Rimi ---")
         try:
             page.goto("https://adstransparency.google.com/?region=EE&domain=rimi.ee", wait_until="domcontentloaded")
-            page.wait_for_selector("creative-preview", timeout=20000)
             
-            print("  [LOG] Performing JS-Deep-Scroll to trigger lazy loading...")
-            for _ in range(15): # More scrolls
-                page.evaluate("window.scrollBy(0, 1500)")
-                time.sleep(1.5)
+            # Click "See all ads" to unlock the full list
+            try:
+                page.locator(".grid-expansion-button").click()
+                print("  [ACTION] Clicked 'See all ads'.")
+                time.sleep(5)
+            except:
+                print("  [WARN] 'See all ads' button not found.")
+
+            # Scroll to load ads
+            page.evaluate("window.scrollBy(0, 1500)")
+            time.sleep(3)
             
             ads = page.locator("creative-preview").all()
-            print(f"  [LOG] Found {len(ads)} ads in DOM. Verifying Media House OÜ...")
+            print(f"  [LOG] Found {len(ads)} potential ads. Verifying via Deep Link...")
 
             processed = 0
             for i, ad in enumerate(ads):
@@ -62,17 +67,20 @@ def scrape_final_fix(limit=10):
                 cr_id = re.search(r"(CR\d+)", href).group(1)
                 detail_url = f"https://adstransparency.google.com{href}"
                 
+                # Verify the advertiser on the detail page
                 check_page = context.new_page()
                 try:
-                    # Verification check
                     check_page.goto(detail_url, wait_until="domcontentloaded", timeout=20000)
-                    is_media = check_page.locator(".advertiser-title:has-text('Media House OÜ')").count() > 0
                     
-                    if is_media:
-                        print(f"  [MATCH] Card {i+1} ({cr_id}) is Rimi.")
+                    # Target the specific snippet: .advertiser-title with the Media House text
+                    is_match = check_page.locator(".advertiser-title:has-text('Media House OÜ')").count() > 0
+                    
+                    if is_match:
+                        print(f"  [MATCH] {cr_id} is verified Media House OÜ.")
                         save_path = f"data/Rimi/{cr_id}.png"
-                        img_el = ad.locator("html-renderer img").first
                         
+                        # Try image download first, then screenshot
+                        img_el = ad.locator("html-renderer img").first
                         if img_el.count() > 0:
                             src = img_el.get_attribute("src")
                             img_data = requests.get(src).content
@@ -82,6 +90,9 @@ def scrape_final_fix(limit=10):
                             ad.screenshot(path=save_path)
                             print(f"    -> Screenshot Saved")
                         processed += 1
+                    else:
+                        # This skips Henkel/Hestia/etc.
+                        pass
                 except: continue
                 finally: check_page.close()
 
@@ -90,4 +101,4 @@ def scrape_final_fix(limit=10):
         browser.close()
 
 if __name__ == "__main__":
-    scrape_final_fix(limit=10)
+    scrape_with_detail_verification(limit=10)
