@@ -4,73 +4,61 @@ import time
 import re
 from playwright.sync_api import sync_playwright
 
-def scrape_advertiser_page():
-    # The "Search" page where all ads are listed
+def scrape_ads_from_grid():
     search_url = "https://adstransparency.google.com/advertiser/AR08638735883022893057?region=EE&preset-date=Last+30+days"
-    base_url = "https://adstransparency.google.com"
-    
     os.makedirs('data', exist_ok=True)
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        context = browser.new_context(viewport={'width': 1920, 'height': 1200})
+        # We increase the timeout and use a realistic user agent
+        context = browser.new_context(
+            viewport={'width': 1920, 'height': 2000},
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+        )
         page = context.new_page()
 
-        print(f"Opening advertiser page: {search_url}")
-        page.goto(search_url, wait_until="networkidle")
-        time.sleep(10) # Let the grid of ads load
-
-        # 1. FIND ALL CREATIVE LINKS
-        # We look for all <a> tags that contain "/creative/CR"
-        links = page.locator("a[href*='/creative/CR']").all()
-        
-        # Use a set to get unique URLs only
-        unique_urls = set()
-        for link in links:
-            href = link.get_attribute("href")
-            if href:
-                full_url = base_url + href if href.startswith("/") else href
-                unique_urls.add(full_url)
-
-        print(f"Found {len(unique_urls)} unique ad URLs. Starting download...")
-
-        # 2. LOOP THROUGH EACH AD PAGE
-        for ad_url in unique_urls:
-            cr_match = re.search(r"(CR\d+)", ad_url)
-            if not cr_match: continue
+        print(f"Loading Advertiser Grid...")
+        try:
+            # Set a longer timeout (60s) to prevent the error you saw
+            page.goto(search_url, wait_until="domcontentloaded", timeout=60000)
             
-            cr_id = cr_match.group(1)
-            save_path = f"data/{cr_id}.png"
-            
-            print(f"Processing: {cr_id}")
-            try:
-                page.goto(ad_url, wait_until="networkidle")
-                time.sleep(8)
+            # Wait for the grid specifically rather than 'networkidle'
+            page.wait_for_selector("creative-preview", timeout=30000)
+            time.sleep(5) # Final settle time
 
-                # Look for the specific container for this CR ID
-                specific_ad_container = page.locator(f"a[href*='{cr_id}']")
+            # 1. Find all ad preview cards
+            ads = page.locator("creative-preview").all()
+            print(f"Detected {len(ads)} ads in the grid.")
+
+            for ad in ads:
+                # 2. Get the CR ID from the link
+                link_element = ad.locator("a[href*='/creative/CR']").first
+                href = link_element.get_attribute("href") if link_element.count() > 0 else None
                 
-                if specific_ad_container.count() > 0:
-                    # Try to find the img inside the html-renderer
-                    img_element = specific_ad_container.locator("html-renderer img").first
+                if not href: continue
+                
+                cr_match = re.search(r"(CR\d+)", href)
+                if not cr_match: continue
+                cr_id = cr_match.group(1)
+                
+                # 3. Get the image inside this specific ad card
+                img_element = ad.locator("html-renderer img").first
+                if img_element.count() > 0:
+                    img_src = img_element.get_attribute("src")
                     
-                    if img_element.count() > 0:
-                        src = img_element.get_attribute("src")
-                        img_data = requests.get(src).content
-                        with open(save_path, "wb") as f:
-                            f.write(img_data)
-                        print(f"Saved image for {cr_id}")
-                    else:
-                        # Fallback to high-res screenshot of the ad element
-                        specific_ad_container.screenshot(path=save_path)
-                        print(f"Captured screenshot for {cr_id}")
+                    print(f"Found {cr_id} -> Downloading: {img_src}")
+                    img_data = requests.get(img_src).content
+                    with open(f"data/{cr_id}.png", "wb") as f:
+                        f.write(img_data)
                 else:
-                    print(f"Skipping {cr_id}: Ad container not found on detail page.")
+                    print(f"Image not found for {cr_id}, taking card screenshot.")
+                    ad.screenshot(path=f"data/{cr_id}.png")
 
-            except Exception as e:
-                print(f"Error on {cr_id}: {e}")
-
+        except Exception as e:
+            print(f"Scraper encountered an issue: {e}")
+            page.screenshot(path="data/error_debug.png")
+        
         browser.close()
 
 if __name__ == "__main__":
-    scrape_advertiser_page()
+    scrape_ads_from_grid()
