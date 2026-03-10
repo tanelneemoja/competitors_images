@@ -5,7 +5,7 @@ import re
 import shutil
 from playwright.sync_api import sync_playwright
 
-def scrape_with_domain_filter(limit=10):
+def scrape_rimi_precision(limit=10):
     # --- 1. CLEAN SLATE ---
     if os.path.exists('data'):
         shutil.rmtree('data')
@@ -20,9 +20,9 @@ def scrape_with_domain_filter(limit=10):
         )
         page = context.new_page()
 
-        # --- STEP 1: SELVER (Keep the logic that worked) ---
+        # --- STEP 1: SELVER (UNCHANGED) ---
         selver_url = "https://adstransparency.google.com/advertiser/AR08638735883022893057?region=EE&preset-date=Last+30+days"
-        print("\n--- Scraping Selver (Standard Mode) ---")
+        print("\n--- Scraping Selver ---")
         try:
             page.goto(selver_url, wait_until="networkidle")
             time.sleep(5)
@@ -38,48 +38,52 @@ def scrape_with_domain_filter(limit=10):
                         print(f"  [SAVED] Selver: {cr_id}")
         except Exception as e: print(f" Selver Error: {e}")
 
-        # --- STEP 2: RIMI (New Domain + Agency Filter) ---
-        # Using the URL you provided
+        # --- STEP 2: RIMI (PRECISION ELEMENT CHECK) ---
         rimi_url = "https://adstransparency.google.com/?region=EE&domain=rimi.ee"
-        print("\n--- Scraping Rimi (Domain + Agency Filter) ---")
+        print("\n--- Scraping Rimi (Precision Mode) ---")
         try:
             page.goto(rimi_url, wait_until="networkidle")
-            # Wait for the cards to load
             page.wait_for_selector("creative-preview", timeout=30000)
-            time.sleep(10) # Wait for "Media House OÜ" labels to appear
+            
+            # Important: Agency pages need extra time to load the 'Media House' label
+            time.sleep(12) 
 
             ads = page.locator("creative-preview").all()
             processed = 0
+            
             for ad in ads:
                 if processed >= limit: break
 
-                # Check specifically for "Media House OÜ" as shown in your image
-                card_text = ad.inner_text()
-                if "Media House OÜ" in card_text:
-                    link = ad.locator("a[href*='/creative/CR']").first
-                    if link.count() == 0: continue
+                # Target the exact class from your snippet: .advertiser-name
+                name_element = ad.locator(".advertiser-name")
+                
+                if name_element.count() > 0:
+                    advertiser_text = name_element.inner_text()
                     
-                    cr_id = re.search(r"(CR\d+)", link.get_attribute("href")).group(1)
-                    img = ad.locator("html-renderer img").first
-                    
-                    if img.count() > 0:
-                        src = img.get_attribute("src")
-                        data = requests.get(src).content
-                        with open(f"data/Rimi/{cr_id}.png", "wb") as f: f.write(data)
-                        print(f"  [MATCH] Rimi via Media House: {cr_id}")
-                        processed += 1
-                    else:
-                        # Fallback to screenshot if image is blocked
-                        ad.screenshot(path=f"data/Rimi/{cr_id}.png")
-                        print(f"  [SCREENSHOT] Rimi: {cr_id}")
-                        processed += 1
-                else:
-                    # This skips "Henkel Latvia" or others from your screenshot
-                    continue
-
+                    if "Media House OÜ" in advertiser_text:
+                        # Extract CR ID from the href in your snippet
+                        link = ad.locator("a[href*='/creative/CR']").first
+                        if link.count() == 0: continue
+                        
+                        cr_id = re.search(r"(CR\d+)", link.get_attribute("href")).group(1)
+                        img = ad.locator("html-renderer img").first
+                        
+                        save_path = f"data/Rimi/{cr_id}.png"
+                        
+                        if img.count() > 0:
+                            src = img.get_attribute("src")
+                            img_data = requests.get(src).content
+                            with open(save_path, "wb") as f: f.write(img_data)
+                            print(f"  [FOUND] Rimi via Media House: {cr_id}")
+                            processed += 1
+                        else:
+                            ad.screenshot(path=save_path)
+                            print(f"  [SCREENSHOT] Rimi: {cr_id}")
+                            processed += 1
+                
         except Exception as e: print(f" Rimi Error: {e}")
 
         browser.close()
 
 if __name__ == "__main__":
-    scrape_with_domain_filter(limit=10)
+    scrape_rimi_precision(limit=10)
