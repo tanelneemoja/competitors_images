@@ -35,11 +35,13 @@ jobs:
           git config --global user.name "Ad-Scraper-Bot"
           git config --global user.email "actions@github.com"
           
-          # Add only the specific CR images
+          # Add all CR-named images in the data folder
           git add data/CR*.png
           
-          # This line checks if there are actual changes before committing
-          # '|| true' ensures the script doesn't crash if nothing changed
-          git commit -m "Map ad creatives to BigQuery IDs" || echo "No changes to commit"
-          
-          git push || echo "Push failed or nothing to push"
+          # Check if there are changes to commit
+          if [ -n "$(git status --porcelain)" ]; then
+            git commit -m "Update/Overwrite creative assets: $(date +'%Y-%m-%d')"
+            git push
+          else
+            echo "No changes detected in images."
+          fi
