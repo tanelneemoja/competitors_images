@@ -4,7 +4,7 @@ import time
 import re
 from playwright.sync_api import sync_playwright
 
-def run_diagnostic_scraper(limit=15):
+def run_diagnostic_scraper(limit=80):
     if not os.path.exists('data/Rimi'): os.makedirs('data/Rimi', exist_ok=True)
     if not os.path.exists('data/Selver'): os.makedirs('data/Selver', exist_ok=True)
 
