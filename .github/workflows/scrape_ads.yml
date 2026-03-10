@@ -35,13 +35,13 @@ jobs:
           git config --global user.name "Ad-Scraper-Bot"
           git config --global user.email "actions@github.com"
           
-          # Add all CR-named images in the data folder
-          git add data/CR*.png
+          # 1. Stage EVERYTHING in the data folder, including deletions
+          git add -A data/
           
-          # Check if there are changes to commit
+          # 2. Commit and push only if there's a difference
           if [ -n "$(git status --porcelain)" ]; then
-            git commit -m "Update/Overwrite creative assets: $(date +'%Y-%m-%d')"
+            git commit -m "Syncing ad library: $(date +'%Y-%m-%d')"
             git push
           else
-            echo "No changes detected in images."
+            echo "GitHub is already perfectly synced with the scraper output."
           fi
