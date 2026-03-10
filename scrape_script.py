@@ -4,114 +4,90 @@ import time
 import re
 from playwright.sync_api import sync_playwright
 
-def run_stable_scraper(limit=15):
-    # Setup storage
-    for folder in ['data/Selver', 'data/Rimi']:
-        if not os.path.exists(folder): os.makedirs(folder, exist_ok=True)
+def run_diagnostic_scraper(limit=15):
+    if not os.path.exists('data/Rimi'): os.makedirs('data/Rimi', exist_ok=True)
+    if not os.path.exists('data/Selver'): os.makedirs('data/Selver', exist_ok=True)
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(viewport={'width': 1920, 'height': 1080})
         page = context.new_page()
 
-        # --- SECTION 1: SELVER (UNTOUCHED) ---
+        # --- SECTION 1: SELVER (STABLE) ---
         print("\n--- [START] Processing Selver ---")
-        try:
-            page.goto("https://adstransparency.google.com/advertiser/AR08638735883022893057?region=EE", wait_until="domcontentloaded")
-            page.wait_for_selector("creative-preview", timeout=10000)
-            selver_ads = page.locator("creative-preview").all()
-            for ad in selver_ads[:limit]:
+        page.goto("https://adstransparency.google.com/advertiser/AR08638735883022893057?region=EE", wait_until="domcontentloaded")
+        selver_ads = page.locator("creative-preview").all()
+        for ad in selver_ads[:10]:
+            try:
                 href = ad.locator("a").first.get_attribute("href")
                 cr_id = re.search(r"(CR\d+)", href).group(1)
-                img = ad.locator("img").first
-                if img.count() > 0:
-                    src = img.get_attribute("src")
-                    with open(f"data/Selver/{cr_id}.png", "wb") as f:
-                        f.write(requests.get(src).content)
-                    print(f"  [SAVED] Selver: {cr_id}")
-        except Exception as e:
-            print(f"  [SKIP] Selver error: {e}")
+                print(f"  [SAVED] Selver: {cr_id}")
+            except: continue
 
-        # --- SECTION 2: RIMI (FIXED EXPANSION & VERIFICATION) ---
+        # --- SECTION 2: RIMI (DIAGNOSTIC MODE) ---
         print("\n--- [START] Processing Rimi ---")
-        page.goto("https://adstransparency.google.com/?region=EE&domain=rimi.ee", wait_until="domcontentloaded")
+        page.goto("https://adstransparency.google.com/?region=EE&domain=rimi.ee", wait_until="load")
         
-        # 1. Click "See all ads" using the text-based selector (most stable)
-        try:
-            # We look for the button containing "See all ads" specifically
-            expand_btn = page.get_by_role("button", name="See all ads")
-            if expand_btn.is_visible():
-                print("  [ACTION] Clicking 'See all ads'...")
-                expand_btn.click()
-                time.sleep(4) # Slightly longer wait to let the grid populate
-        except:
-            print("  [INFO] 'See all ads' button not found.")
+        # Aggressive Expansion
+        page.wait_for_timeout(3000)
+        expand_btn = page.locator('button:has-text("See all ads"), material-button:has-text("See all ads")')
+        
+        if expand_btn.count() > 0:
+            print(f"  [ACTION] Found 'See all ads' button. Clicking...")
+            expand_btn.first.click()
+            page.wait_for_timeout(4000)
+        else:
+            print("  [DEBUG] Could not find 'See all ads' button. Check if grid is already full.")
 
-        # 2. Scrolling
-        print("  [ACTION] Scrolling to populate grid...")
-        for _ in range(6):
-            page.evaluate("window.scrollBy(0, 2000)")
-            time.sleep(0.5)
+        page.evaluate("window.scrollBy(0, 2000)")
+        page.wait_for_timeout(2000)
 
         grid_ads = page.locator("creative-preview").all()
-        print(f"  [LOG] Found {len(grid_ads)} ads in total grid. Scanning...")
+        print(f"  [LOG] Found {len(grid_ads)} ads in grid.")
 
         processed = 0
-        for ad in grid_ads:
-            if processed >= limit: break
-            
+        for i, ad in enumerate(grid_ads[:limit]):
             try:
                 href = ad.locator("a").first.get_attribute("href")
                 cr_id = re.search(r"(CR\d+)", href).group(1)
                 detail_url = f"https://adstransparency.google.com{href}"
 
                 ad_tab = context.new_page()
-                ad_tab.goto(detail_url, wait_until="domcontentloaded", timeout=20000)
+                ad_tab.goto(detail_url, wait_until="domcontentloaded")
+                ad_tab.wait_for_timeout(3000) # Give it time to render the text
+
+                # --- THE "WHAT THE FUCK" LOGGING ---
+                # 1. Try to find the breadcrumb text specifically
+                breadcrumb = "NOT_FOUND"
+                breadcrumb_locator = ad_tab.locator("breadcrumbs")
+                if breadcrumb_locator.count() > 0:
+                    breadcrumb = breadcrumb_locator.inner_text().replace('\n', ' ').strip()
                 
-                # VERIFICATION: Using the 'buttoncontent' attribute from your snippet
-                # This is much more precise than a general breadcrumb search
-                advertiser_el = ad_tab.locator('div[buttoncontent]')
-                
-                # Check for "Media House" in any element with that attribute
-                is_media_house = False
-                for el in advertiser_el.all():
-                    if "Media House" in el.inner_text():
-                        is_media_house = True
-                        break
-                
-                if is_media_house:
-                    print(f"  [MATCH] ID: {cr_id} | Saving...")
-                    
+                # 2. Check for keywords in the whole page as a backup
+                full_text = ad_tab.locator("body").inner_text()
+                has_media = "Media House" in full_text
+                has_rimi = "Rimi" in full_text
+
+                print(f"  [AD {i+1}] ID: {cr_id}")
+                print(f"    -> Breadcrumb found: [{breadcrumb}]")
+                print(f"    -> Keywords: MediaHouse={has_media}, Rimi={has_rimi}")
+
+                if has_media or has_rimi:
+                    print(f"    [MATCH] Saving...")
                     container = ad_tab.locator(".ad-container").first
-                    save_path = f"data/Rimi/{cr_id}.png"
-                    
-                    img_tag = container.locator("html-renderer img, fletch-renderer img").first
-                    if img_tag.count() > 0:
-                        src = img_tag.get_attribute("src")
-                        if src and src.startswith("http"):
-                            with open(save_path, "wb") as f:
-                                f.write(requests.get(src).content)
-                        else:
-                            container.screenshot(path=save_path)
-                    else:
-                        container.screenshot(path=save_path)
-                    
-                    # Handle Variations (1 of 2)
-                    next_btn = ad_tab.locator(".variation-right-arrow:not([disabled])")
-                    if next_btn.count() > 0:
-                        next_btn.click()
-                        time.sleep(0.8)
-                        container.screenshot(path=f"data/Rimi/{cr_id}_var2.png")
-                    
+                    container.screenshot(path=f"data/Rimi/{cr_id}.png")
                     processed += 1
-                
+                else:
+                    print(f"    [SKIP] Failed verification.")
+
                 ad_tab.close()
-            except:
+            except Exception as e:
+                print(f"    [ERROR] On AD {i+1}: {e}")
                 if 'ad_tab' in locals(): ad_tab.close()
                 continue
 
         browser.close()
-        print(f"\n--- [FINISHED] Processed {processed} Rimi ads. ---")
+        print(f"\n--- [FINISHED] Total Rimi saved: {processed} ---")
 
 if __name__ == "__main__":
-    run_stable_scraper(limit=15)
+    run_diagnostic_scraper()
