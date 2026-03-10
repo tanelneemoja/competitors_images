@@ -5,8 +5,7 @@ import re
 import shutil
 from playwright.sync_api import sync_playwright
 
-def scrape_with_logs(limit=10):
-    # --- 1. CLEAN SLATE ---
+def scrape_with_flexible_logs(limit=10):
     if os.path.exists('data'):
         shutil.rmtree('data')
     os.makedirs('data/Selver', exist_ok=True)
@@ -20,17 +19,13 @@ def scrape_with_logs(limit=10):
         )
         page = context.new_page()
 
-        # --- STEP 1: SELVER ---
-        selver_url = "https://adstransparency.google.com/advertiser/AR08638735883022893057?region=EE&preset-date=Last+30+days"
+        # --- STEP 1: SELVER (STAYS WORKING) ---
         print("\n--- [START] Processing Selver ---")
         try:
-            page.goto(selver_url, wait_until="networkidle")
-            page.wait_for_selector(".advertiser-name:has-text('Selver')", timeout=15000)
-            
+            page.goto("https://adstransparency.google.com/advertiser/AR08638735883022893057?region=EE&preset-date=Last+30+days", wait_until="networkidle")
+            page.wait_for_selector("creative-preview", timeout=15000)
             ads = page.locator("creative-preview").all()
-            print(f"  [LOG] Found {len(ads)} potential Selver cards.")
-            
-            for i, ad in enumerate(ads[:limit]):
+            for ad in ads[:limit]:
                 link = ad.locator("a[href*='/creative/CR']").first
                 if link.count() > 0:
                     cr_id = re.search(r"(CR\d+)", link.get_attribute("href")).group(1)
@@ -38,62 +33,60 @@ def scrape_with_logs(limit=10):
                     if img.count() > 0:
                         data = requests.get(img.get_attribute("src")).content
                         with open(f"data/Selver/{cr_id}.png", "wb") as f: f.write(data)
-                        print(f"  [SAVED] Selver: {cr_id}.png")
-        except Exception as e:
-            print(f"  [ERROR] Selver Step: {e}")
+                        print(f"  [SAVED] Selver: {cr_id}")
+        except Exception as e: print(f"  [ERROR] Selver: {e}")
 
-        # --- STEP 2: RIMI ---
-        rimi_url = "https://adstransparency.google.com/?region=EE&domain=rimi.ee"
+        # --- STEP 2: RIMI (FLEXIBLE WAIT) ---
         print("\n--- [START] Processing Rimi ---")
         try:
-            page.goto(rimi_url, wait_until="networkidle")
+            page.goto("https://adstransparency.google.com/?region=EE&domain=rimi.ee", wait_until="networkidle")
             
-            print("  [LOG] Waiting for 'Media House OÜ' to appear in the DOM...")
-            page.wait_for_selector(".advertiser-name:has-text('Media House OÜ')", timeout=30000)
+            # Wait for the advertiser-name tag to exist at all, rather than specific text
+            print("  [LOG] Waiting for grid to populate...")
+            page.wait_for_selector(".advertiser-name", timeout=30000)
             
-            time.sleep(5) # Stabilization buffer
+            # Allow a massive hydration buffer for agency metadata
+            time.sleep(15) 
             
             ads = page.locator("creative-preview").all()
-            print(f"  [LOG] Found {len(ads)} total cards on Rimi domain page.")
+            print(f"  [LOG] Found {len(ads)} total cards. Scanning for Media House...")
             
             processed = 0
             for i, ad in enumerate(ads):
                 if processed >= limit: break
 
-                name_tag = ad.locator(".advertiser-name")
+                # Get all text from the card to avoid selector misses
+                all_text = ad.inner_text()
                 
-                if name_tag.count() > 0:
-                    current_name = name_tag.inner_text().strip()
+                # Use a case-insensitive check for "Media House"
+                if "media house" in all_text.lower():
+                    link = ad.locator("a[href*='/creative/CR']").first
+                    if link.count() == 0: continue
                     
-                    if "Media House OÜ" in current_name:
-                        link = ad.locator("a[href*='/creative/CR']").first
-                        if link.count() == 0: continue
-                        
-                        cr_id = re.search(r"(CR\d+)", link.get_attribute("href")).group(1)
-                        img = ad.locator("html-renderer img").first
-                        save_path = f"data/Rimi/{cr_id}.png"
-                        
-                        if img.count() > 0:
-                            src = img.get_attribute("src")
-                            img_data = requests.get(src).content
-                            with open(save_path, "wb") as f: f.write(img_data)
-                            print(f"  [MATCH] Card {i+1}: Found Media House -> Saved {cr_id}")
-                            processed += 1
-                        else:
-                            ad.screenshot(path=save_path)
-                            print(f"  [SCREENSHOT] Card {i+1}: Found Media House -> Saved {cr_id}")
-                            processed += 1
+                    cr_id = re.search(r"(CR\d+)", link.get_attribute("href")).group(1)
+                    img = ad.locator("html-renderer img").first
+                    save_path = f"data/Rimi/{cr_id}.png"
+                    
+                    if img.count() > 0:
+                        src = img.get_attribute("src")
+                        img_data = requests.get(src).content
+                        with open(save_path, "wb") as f: f.write(img_data)
+                        print(f"  [MATCH] Card {i+1}: Saved {cr_id}")
+                        processed += 1
                     else:
-                        print(f"  [SKIP] Card {i+1}: Advertiser is '{current_name}'")
+                        ad.screenshot(path=save_path)
+                        print(f"  [SCREENSHOT] Card {i+1}: Saved {cr_id}")
+                        processed += 1
                 else:
-                    # Fixed the line break here that caused the SyntaxError
-                    print(f"  [WARN] Card {i+1}: Could not find an advertiser name tag.")
+                    # Log what it actually found so we can debug the "0 found"
+                    # We take the first 30 chars of the card text
+                    preview_text = all_text.replace('\n', ' ')[:30]
+                    print(f"  [SKIP] Card {i+1}: Content: '{preview_text}...'")
 
         except Exception as e:
-            print(f"  [ERROR] Rimi Step: {e}")
+            print(f"  [ERROR] Rimi: {e}")
 
-        print("\n--- [FINISHED] All tasks complete. ---")
         browser.close()
 
 if __name__ == "__main__":
-    scrape_with_logs(limit=10)
+    scrape_with_flexible_logs(limit=10)
