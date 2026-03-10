@@ -5,7 +5,7 @@ import re
 import shutil
 from playwright.sync_api import sync_playwright
 
-def scrape_with_detail_verification(limit=10):
+def scrape_with_snippet_verification(limit=10):
     if os.path.exists('data'):
         shutil.rmtree('data')
     os.makedirs('data/Selver', exist_ok=True)
@@ -19,7 +19,7 @@ def scrape_with_detail_verification(limit=10):
         )
         page = context.new_page()
 
-        # --- STEP 1: SELVER (KEEPING YOUR WORKING CODE) ---
+        # --- STEP 1: SELVER ---
         print("\n--- [START] Processing Selver ---")
         try:
             page.goto("https://adstransparency.google.com/advertiser/AR08638735883022893057?region=EE&preset-date=Last+30+days", wait_until="domcontentloaded")
@@ -36,25 +36,25 @@ def scrape_with_detail_verification(limit=10):
                         print(f"  [SAVED] Selver: {cr_id}")
         except Exception as e: print(f"  [ERROR] Selver: {e}")
 
-        # --- STEP 2: RIMI (DEEP ELEMENT VERIFICATION) ---
+        # --- STEP 2: RIMI (EXACT SNIPPET CHECK) ---
         print("\n--- [START] Processing Rimi ---")
         try:
             page.goto("https://adstransparency.google.com/?region=EE&domain=rimi.ee", wait_until="domcontentloaded")
             
-            # Click "See all ads" to unlock the full list
+            # Click expansion button to see all 800+ ads
             try:
                 page.locator(".grid-expansion-button").click()
-                print("  [ACTION] Clicked 'See all ads'.")
+                print("  [ACTION] Grid expanded.")
                 time.sleep(5)
             except:
-                print("  [WARN] 'See all ads' button not found.")
+                print("  [WARN] Expand button skipped.")
 
-            # Scroll to load ads
-            page.evaluate("window.scrollBy(0, 1500)")
+            # Initial Scroll
+            page.evaluate("window.scrollBy(0, 2000)")
             time.sleep(3)
             
             ads = page.locator("creative-preview").all()
-            print(f"  [LOG] Found {len(ads)} potential ads. Verifying via Deep Link...")
+            print(f"  [LOG] Analyzing {len(ads)} ads...")
 
             processed = 0
             for i, ad in enumerate(ads):
@@ -67,19 +67,20 @@ def scrape_with_detail_verification(limit=10):
                 cr_id = re.search(r"(CR\d+)", href).group(1)
                 detail_url = f"https://adstransparency.google.com{href}"
                 
-                # Verify the advertiser on the detail page
+                # New tab for verification
                 check_page = context.new_page()
                 try:
-                    check_page.goto(detail_url, wait_until="domcontentloaded", timeout=20000)
+                    check_page.goto(detail_url, wait_until="domcontentloaded", timeout=25000)
                     
-                    # Target the specific snippet: .advertiser-title with the Media House text
-                    is_match = check_page.locator(".advertiser-title:has-text('Media House OÜ')").count() > 0
+                    # Targeting the specific anchor tag from your snippet
+                    # Using the aria-label attribute for maximum reliability
+                    target_advertiser = check_page.locator("a.advertiser-title[aria-label*='Media House OÜ']")
                     
-                    if is_match:
-                        print(f"  [MATCH] {cr_id} is verified Media House OÜ.")
+                    if target_advertiser.count() > 0:
+                        print(f"  [MATCH] {cr_id} confirmed via snippet.")
                         save_path = f"data/Rimi/{cr_id}.png"
                         
-                        # Try image download first, then screenshot
+                        # Grab the content
                         img_el = ad.locator("html-renderer img").first
                         if img_el.count() > 0:
                             src = img_el.get_attribute("src")
@@ -91,14 +92,17 @@ def scrape_with_detail_verification(limit=10):
                             print(f"    -> Screenshot Saved")
                         processed += 1
                     else:
-                        # This skips Henkel/Hestia/etc.
-                        pass
-                except: continue
-                finally: check_page.close()
+                        # Log skip to confirm it's checking correctly
+                        if i % 10 == 0:
+                            print(f"  [SKIP] Checked {i} ads so far...")
+                except:
+                    continue
+                finally:
+                    check_page.close()
 
         except Exception as e: print(f"  [ERROR] Rimi: {e}")
 
         browser.close()
 
 if __name__ == "__main__":
-    scrape_with_detail_verification(limit=10)
+    scrape_with_snippet_verification(limit=10)
