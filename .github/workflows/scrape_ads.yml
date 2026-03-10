@@ -35,14 +35,13 @@ jobs:
           git config --global user.name "Ad-Scraper-Bot"
           git config --global user.email "actions@github.com"
           
-          # Ensure the directory exists so git add doesn't crash
           mkdir -p data
-          
-          # Only add and commit if there are actually files in data/
-          if [ -n "$(ls -A data/ 2>/dev/null)" ]; then
-            git add data/
-            git commit -m "Auto-scraped new ad creative"
+          # Only add if the specific image was created
+          if [ -f "data/test_ad.png" ]; then
+            git add data/test_ad.png
+            git add data/debug_view.png # Useful to see why it might have failed
+            git commit -m "Update ad images"
             git push
           else
-            echo "No files found in data directory. Skipping commit."
+            echo "No image found to commit."
           fi
