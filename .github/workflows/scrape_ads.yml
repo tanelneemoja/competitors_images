@@ -36,11 +36,15 @@ jobs:
           git config --global user.email "actions@github.com"
           
           mkdir -p data
-          # Only add if the specific image was created
-          if [ -f "data/test_ad.png" ]; then
-            git add data/test_ad.png
-            git add data/debug_view.png # Useful to see why it might have failed
-            git commit -m "Update ad images"
+          
+          # This looks for any file starting with CR
+          if ls data/CR*.png 1> /dev/null 2>&1; then
+            git add data/CR*.png
+            git commit -m "Added creative image for BigQuery matching"
+            git push
+          else
+            echo "No CR-named images found."
+          fi
             git push
           else
             echo "No image found to commit."
