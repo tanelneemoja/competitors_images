@@ -51,8 +51,7 @@ def scrape_with_logs(limit=10):
             print("  [LOG] Waiting for 'Media House OÜ' to appear in the DOM...")
             page.wait_for_selector(".advertiser-name:has-text('Media House OÜ')", timeout=30000)
             
-            # Give it a moment to stabilize all 40 cards
-            time.sleep(5)
+            time.sleep(5) # Stabilization buffer
             
             ads = page.locator("creative-preview").all()
             print(f"  [LOG] Found {len(ads)} total cards on Rimi domain page.")
@@ -61,7 +60,6 @@ def scrape_with_logs(limit=10):
             for i, ad in enumerate(ads):
                 if processed >= limit: break
 
-                # Locate the specific advertiser name for THIS card
                 name_tag = ad.locator(".advertiser-name")
                 
                 if name_tag.count() > 0:
@@ -83,10 +81,19 @@ def scrape_with_logs(limit=10):
                             processed += 1
                         else:
                             ad.screenshot(path=save_path)
-                            print(f"  [SCREENSHOT] Card {i+1}: Found Media House (Renderer) -> Saved {cr_id}")
+                            print(f"  [SCREENSHOT] Card {i+1}: Found Media House -> Saved {cr_id}")
                             processed += 1
                     else:
-                        # This log will show you exactly what it's skipping
                         print(f"  [SKIP] Card {i+1}: Advertiser is '{current_name}'")
                 else:
-                    print(f"  [WARN] Card
+                    # Fixed the line break here that caused the SyntaxError
+                    print(f"  [WARN] Card {i+1}: Could not find an advertiser name tag.")
+
+        except Exception as e:
+            print(f"  [ERROR] Rimi Step: {e}")
+
+        print("\n--- [FINISHED] All tasks complete. ---")
+        browser.close()
+
+if __name__ == "__main__":
+    scrape_with_logs(limit=10)
