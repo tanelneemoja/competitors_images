@@ -35,13 +35,12 @@ jobs:
           git config --global user.name "Ad-Scraper-Bot"
           git config --global user.email "actions@github.com"
           
-          # 1. Stage EVERYTHING in the data folder, including deletions
+          # Add all changes (new files, modified files, AND deleted files)
           git add -A data/
           
-          # 2. Commit and push only if there's a difference
           if [ -n "$(git status --porcelain)" ]; then
-            git commit -m "Syncing ad library: $(date +'%Y-%m-%d')"
+            git commit -m "Organized batch sync: $(date +'%Y-%m-%d')"
             git push
           else
-            echo "GitHub is already perfectly synced with the scraper output."
+            echo "No changes in ad library."
           fi
