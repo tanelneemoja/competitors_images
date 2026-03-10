@@ -4,61 +4,73 @@ import time
 import re
 from playwright.sync_api import sync_playwright
 
-def scrape_ads(url_list):
+def scrape_advertiser_page():
+    # The "Search" page where all ads are listed
+    search_url = "https://adstransparency.google.com/advertiser/AR08638735883022893057?region=EE&preset-date=Last+30+days"
+    base_url = "https://adstransparency.google.com"
+    
     os.makedirs('data', exist_ok=True)
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        # Using a large viewport ensures responsive ads render correctly
         context = browser.new_context(viewport={'width': 1920, 'height': 1200})
         page = context.new_page()
 
-        for url in url_list:
-            # Extract CR ID from the current URL
-            cr_match = re.search(r"(CR\d+)", url)
-            if not cr_match:
-                print(f"Skipping: No CR ID found in {url}")
-                continue
+        print(f"Opening advertiser page: {search_url}")
+        page.goto(search_url, wait_until="networkidle")
+        time.sleep(10) # Let the grid of ads load
+
+        # 1. FIND ALL CREATIVE LINKS
+        # We look for all <a> tags that contain "/creative/CR"
+        links = page.locator("a[href*='/creative/CR']").all()
+        
+        # Use a set to get unique URLs only
+        unique_urls = set()
+        for link in links:
+            href = link.get_attribute("href")
+            if href:
+                full_url = base_url + href if href.startswith("/") else href
+                unique_urls.add(full_url)
+
+        print(f"Found {len(unique_urls)} unique ad URLs. Starting download...")
+
+        # 2. LOOP THROUGH EACH AD PAGE
+        for ad_url in unique_urls:
+            cr_match = re.search(r"(CR\d+)", ad_url)
+            if not cr_match: continue
             
             cr_id = cr_match.group(1)
             save_path = f"data/{cr_id}.png"
             
-            print(f"--- Processing {cr_id} ---")
+            print(f"Processing: {cr_id}")
             try:
-                page.goto(url, wait_until="networkidle")
-                time.sleep(10) # Give the ad-renderer time to load assets
+                page.goto(ad_url, wait_until="networkidle")
+                time.sleep(8)
 
-                # Use the anchor logic: Find the <a> tag for THIS specific CR ID
+                # Look for the specific container for this CR ID
                 specific_ad_container = page.locator(f"a[href*='{cr_id}']")
-
+                
                 if specific_ad_container.count() > 0:
-                    # Look for the image asset inside this specific container
+                    # Try to find the img inside the html-renderer
                     img_element = specific_ad_container.locator("html-renderer img").first
                     
                     if img_element.count() > 0:
                         src = img_element.get_attribute("src")
-                        print(f"Downloading high-res: {src}")
                         img_data = requests.get(src).content
                         with open(save_path, "wb") as f:
                             f.write(img_data)
+                        print(f"Saved image for {cr_id}")
                     else:
-                        # Fallback to screenshot if the raw image link is hidden
-                        print("Taking container screenshot as fallback.")
+                        # Fallback to high-res screenshot of the ad element
                         specific_ad_container.screenshot(path=save_path)
+                        print(f"Captured screenshot for {cr_id}")
                 else:
-                    print(f"Could not find container for {cr_id}")
-            
+                    print(f"Skipping {cr_id}: Ad container not found on detail page.")
+
             except Exception as e:
-                print(f"Error scraping {cr_id}: {e}")
+                print(f"Error on {cr_id}: {e}")
 
         browser.close()
 
 if __name__ == "__main__":
-    # Add your new URLs to this list
-    urls_to_scrape = [
-        "https://adstransparency.google.com/advertiser/AR08638735883022893057/creative/CR16900379659001135105?region=EE",
-        "https://adstransparency.google.com/advertiser/AR08638735883022893057/creative/CR17811241479729840129?region=EE",
-        "https://adstransparency.google.com/advertiser/AR08638735883022893057/creative/CR01262577731980230657?region=EE",
-        "https://adstransparency.google.com/advertiser/AR08638735883022893057/creative/CR15983061505994129409?region=EE"
-    ]
-    scrape_ads(urls_to_scrape)
+    scrape_advertiser_page()
