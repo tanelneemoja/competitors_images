@@ -16,46 +16,40 @@ def scrape_filtered_ads():
         )
         page = context.new_page()
 
-        print(f"Loading Advertiser Page with Filter...")
+        print(f"Loading Advertiser Page...")
         try:
             page.goto(search_url, wait_until="domcontentloaded", timeout=60000)
-            
-            # THE FIX: Wait for the 'ads-count' element to show the filtered number
-            # This forces the bot to wait until the "6 ads" text is rendered.
             page.wait_for_selector(".ads-count", timeout=30000)
-            time.sleep(5) # Extra buffer for the grid to refresh
+            time.sleep(8) # Wait for JS to hide the non-filtered ads
 
-            # Double check the count in logs
+            # Extract the number from "6 ads"
             count_text = page.locator(".ads-count").inner_text()
-            print(f"UI confirms: {count_text}")
+            match = re.search(r"(\d+)", count_text)
+            max_ads = int(match.group(1)) if match else 6
+            print(f"Targeting exactly {max_ads} ads based on UI count.")
 
-            # 1. Target only the ads currently visible in the grid
-            ads = page.locator("creative-preview").all()
+            # Focus only on the 'priority' grid which usually holds the filtered results
+            ads = page.locator("priority-creative-grid creative-preview").all()
             
-            # Safety check: if we wanted 6 but got 40, the filter failed.
-            if "6" in count_text and len(ads) > 10:
-                print("Filter mismatch detected. Re-filtering results...")
-                # We can refine the selection by only taking ads within the priority grid
-                ads = page.locator("priority-creative-grid creative-preview").all()
-
-            print(f"Scraping {len(ads)} ads...")
-
+            count = 0
             for ad in ads:
-                # Get CR ID
+                if count >= max_ads:
+                    break # Stop once we reach the limit
+                
                 link_element = ad.locator("a[href*='/creative/CR']").first
                 href = link_element.get_attribute("href") if link_element.count() > 0 else None
                 
                 if not href: continue
                 cr_id = re.search(r"(CR\d+)", href).group(1)
                 
-                # Get Image
                 img_element = ad.locator("html-renderer img").first
                 if img_element.count() > 0:
                     img_src = img_element.get_attribute("src")
                     img_data = requests.get(img_src).content
                     with open(f"data/{cr_id}.png", "wb") as f:
                         f.write(img_data)
-                    print(f"Saved: {cr_id}")
+                    print(f"Saved ({count+1}/{max_ads}): {cr_id}")
+                    count += 1
 
         except Exception as e:
             print(f"Error: {e}")
