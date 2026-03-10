@@ -5,7 +5,7 @@ import re
 import shutil
 from playwright.sync_api import sync_playwright
 
-def scrape_with_snippet_verification(limit=10):
+def scrape_rimi_final_logic(limit=10):
     if os.path.exists('data'):
         shutil.rmtree('data')
     os.makedirs('data/Selver', exist_ok=True)
@@ -19,10 +19,10 @@ def scrape_with_snippet_verification(limit=10):
         )
         page = context.new_page()
 
-        # --- STEP 1: SELVER ---
+        # --- STEP 1: SELVER (STABLE) ---
         print("\n--- [START] Processing Selver ---")
         try:
-            page.goto("https://adstransparency.google.com/advertiser/AR08638735883022893057?region=EE&preset-date=Last+30+days", wait_until="domcontentloaded")
+            page.goto("https://adstransparency.google.com/advertiser/AR08638735883022893057?region=EE", wait_until="domcontentloaded")
             page.wait_for_selector("creative-preview", timeout=15000)
             ads = page.locator("creative-preview").all()
             for ad in ads[:limit]:
@@ -36,25 +36,24 @@ def scrape_with_snippet_verification(limit=10):
                         print(f"  [SAVED] Selver: {cr_id}")
         except Exception as e: print(f"  [ERROR] Selver: {e}")
 
-        # --- STEP 2: RIMI (EXACT SNIPPET CHECK) ---
+        # --- STEP 2: RIMI (BREADCRUMB VERIFICATION) ---
         print("\n--- [START] Processing Rimi ---")
         try:
             page.goto("https://adstransparency.google.com/?region=EE&domain=rimi.ee", wait_until="domcontentloaded")
             
-            # Click expansion button to see all 800+ ads
+            # Click the expansion button (the fix you found)
             try:
                 page.locator(".grid-expansion-button").click()
-                print("  [ACTION] Grid expanded.")
-                time.sleep(5)
-            except:
-                print("  [WARN] Expand button skipped.")
+                print("  [ACTION] Expanded Grid.")
+                time.sleep(4)
+            except: pass
 
-            # Initial Scroll
-            page.evaluate("window.scrollBy(0, 2000)")
+            # Scroll once to ensure the first batch of Rimi ads are loaded
+            page.evaluate("window.scrollBy(0, 2500)")
             time.sleep(3)
             
             ads = page.locator("creative-preview").all()
-            print(f"  [LOG] Analyzing {len(ads)} ads...")
+            print(f"  [LOG] Analyzing {len(ads)} ads found in the grid...")
 
             processed = 0
             for i, ad in enumerate(ads):
@@ -67,42 +66,44 @@ def scrape_with_snippet_verification(limit=10):
                 cr_id = re.search(r"(CR\d+)", href).group(1)
                 detail_url = f"https://adstransparency.google.com{href}"
                 
-                # New tab for verification
-                check_page = context.new_page()
+                # Verification Step
+                v_page = context.new_page()
                 try:
-                    check_page.goto(detail_url, wait_until="domcontentloaded", timeout=25000)
+                    v_page.goto(detail_url, wait_until="domcontentloaded", timeout=25000)
                     
-                    # Targeting the specific anchor tag from your snippet
-                    # Using the aria-label attribute for maximum reliability
-                    target_advertiser = check_page.locator("a.advertiser-title[aria-label*='Media House OÜ']")
+                    # TARGET: Breadcrumb button content (Highest reliable element)
+                    # From your snippet: <div buttoncontent="" class="_ngcontent-awb-2">Media House OÜ</div>
+                    breadcrumb = v_page.locator("breadcrumbs .advertiser-scope-button .content div[buttoncontent]")
                     
-                    if target_advertiser.count() > 0:
-                        print(f"  [MATCH] {cr_id} confirmed via snippet.")
+                    if breadcrumb.count() > 0 and "Media House OÜ" in breadcrumb.inner_text():
+                        print(f"  [VERIFIED] Ad {cr_id} belongs to Media House OÜ.")
+                        
                         save_path = f"data/Rimi/{cr_id}.png"
                         
-                        # Grab the content
-                        img_el = ad.locator("html-renderer img").first
+                        # IMAGE EXTRACTION
+                        # Checking html-renderer (images) and fletch-renderer (YouTube/HTML5)
+                        img_src = None
+                        img_el = v_page.locator("html-renderer img, fletch-renderer img").first
+                        
                         if img_el.count() > 0:
-                            src = img_el.get_attribute("src")
-                            img_data = requests.get(src).content
+                            img_src = img_el.get_attribute("src")
+                            img_data = requests.get(img_src).content
                             with open(save_path, "wb") as f: f.write(img_data)
-                            print(f"    -> Image Saved")
+                            print(f"    -> Image Saved.")
                         else:
-                            ad.screenshot(path=save_path)
-                            print(f"    -> Screenshot Saved")
+                            # If no direct image, screenshot the ad area
+                            v_page.locator("creative").first.screenshot(path=save_path)
+                            print(f"    -> Screenshot Captured.")
+                            
                         processed += 1
-                    else:
-                        # Log skip to confirm it's checking correctly
-                        if i % 10 == 0:
-                            print(f"  [SKIP] Checked {i} ads so far...")
                 except:
                     continue
                 finally:
-                    check_page.close()
+                    v_page.close()
 
         except Exception as e: print(f"  [ERROR] Rimi: {e}")
 
         browser.close()
 
 if __name__ == "__main__":
-    scrape_with_snippet_verification(limit=10)
+    scrape_rimi_final_logic(limit=10)
