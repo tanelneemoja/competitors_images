@@ -35,17 +35,11 @@ jobs:
           git config --global user.name "Ad-Scraper-Bot"
           git config --global user.email "actions@github.com"
           
-          mkdir -p data
+          # Add only the specific CR images
+          git add data/CR*.png
           
-          # Use the 'if' statement correctly with a 'fi' at the end
-          if ls data/CR*.png 1> /dev/null 2>&1; then
-            git add data/CR*.png
-            git commit -m "Added creative image for BigQuery matching"
-            git push
-          else
-            echo "No CR-named images found."
-          fi
-            git push
-          else
-            echo "No image found to commit."
-          fi
+          # This line checks if there are actual changes before committing
+          # '|| true' ensures the script doesn't crash if nothing changed
+          git commit -m "Map ad creatives to BigQuery IDs" || echo "No changes to commit"
+          
+          git push || echo "Push failed or nothing to push"
