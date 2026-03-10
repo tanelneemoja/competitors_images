@@ -1,0 +1,36 @@
+name: Scrape Competitor Ads
+
+on:
+  schedule:
+    - cron: '0 0 * * *' # Runs daily at midnight
+  workflow_dispatch:
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          pip install playwright pandas
+          playwright install --with-deps chromium
+
+      - name: Run Scraper
+        run: python scrape_script.py
+        env:
+          COMPETITOR_ID: ${{ secrets.COMPETITOR_ID }} # Store "AR..." IDs in GitHub Secrets
+
+      - name: Commit and Push Images
+        run: |
+          git config --global user.name "AdBot"
+          git config --global user.email "bot@github.com"
+          git add data/
+          git commit -m "Auto-update competitor ad images" || echo "No changes"
+          git push
