@@ -37,7 +37,7 @@ jobs:
           
           mkdir -p data
           
-          # This looks for any file starting with CR
+          # Use the 'if' statement correctly with a 'fi' at the end
           if ls data/CR*.png 1> /dev/null 2>&1; then
             git add data/CR*.png
             git commit -m "Added creative image for BigQuery matching"
