@@ -4,113 +4,106 @@ import time
 import re
 from playwright.sync_api import sync_playwright
 
-def run_unlimited_scraper():
-    # Setup storage
+def run_full_competitor_scraper():
+    # 1. Setup Storage
     for folder in ['data/Selver', 'data/Rimi']:
-        if not os.path.exists(folder): os.makedirs(folder, exist_ok=True)
+        if not os.path.exists(folder):
+            os.makedirs(folder, exist_ok=True)
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        # Set headless=False to watch the process live
+        browser = p.chromium.launch(headless=False) 
         context = browser.new_context(viewport={'width': 1920, 'height': 1080})
         page = context.new_page()
 
-        # --- SECTION 1: SELVER (UNLIMITED) ---
-        print("\n--- [START] Processing Selver (Full Scan) ---")
-        page.goto("https://adstransparency.google.com/advertiser/AR08638735883022893057?region=EE", wait_until="domcontentloaded")
-        
-        # Scroll to the bottom of Selver's portfolio
-        print("  [ACTION] Scrolling to load all Selver ads...")
-        last_height = page.evaluate("document.body.scrollHeight")
-        while True:
-            page.evaluate("window.scrollBy(0, 2000)")
-            time.sleep(1)
-            new_height = page.evaluate("document.body.scrollHeight")
-            if new_height == last_height: break
-            last_height = new_height
-
-        selver_ads = page.locator("creative-preview").all()
-        print(f"  [LOG] Found {len(selver_ads)} total Selver ads. Saving...")
-        
-        for ad in selver_ads:
-            try:
-                href = ad.locator("a").first.get_attribute("href")
-                cr_id = re.search(r"(CR\d+)", href).group(1)
-                img = ad.locator("img").first
-                if img.count() > 0:
-                    src = img.get_attribute("src")
-                    if src and src.startswith("http"):
-                        with open(f"data/Selver/{cr_id}.png", "wb") as f:
-                            f.write(requests.get(src).content)
-                # print(f"  [SAVED] Selver: {cr_id}") # Optional: uncomment if you want to see every ID
-            except: continue
-
-        # --- SECTION 2: RIMI (UNLIMITED GRID SCAN) ---
-        print("\n--- [START] Processing Rimi (Full Scan) ---")
-        page.goto("https://adstransparency.google.com/?region=EE&domain=rimi.ee", wait_until="load")
-        
-        # Expand the grid if button exists
+        # --- SECTION 1: SELVER (STABLE) ---
+        print("\n--- [START] Processing Selver ---")
         try:
-            expand_btn = page.get_by_role("button", name=re.compile("See all ads", re.IGNORECASE))
+            page.goto("https://adstransparency.google.com/advertiser/AR08638735883022893057?region=EE", wait_until="networkidle")
+            
+            # Scroll to load ads
+            for _ in range(5):
+                page.evaluate("window.scrollBy(0, 2000)")
+                time.sleep(1)
+
+            selver_ads = page.locator("creative-preview").all()
+            print(f"  [LOG] Found {len(selver_ads)} Selver ads. Saving...")
+            
+            for ad in selver_ads:
+                try:
+                    href = ad.locator("a").first.get_attribute("href")
+                    cr_id = re.search(r"(CR\d+)", href).group(1)
+                    img = ad.locator("img").first
+                    if img.count() > 0:
+                        src = img.get_attribute("src")
+                        if src and src.startswith("http"):
+                            with open(f"data/Selver/{cr_id}.png", "wb") as f:
+                                f.write(requests.get(src).content)
+                except: continue
+        except Exception as e:
+            print(f"  [ERROR] Selver section failed: {e}")
+
+        # --- SECTION 2: RIMI (REFINED DIAGNOSTIC LOGIC) ---
+        print("\n--- [START] Processing Rimi ---")
+        try:
+            page.goto("https://adstransparency.google.com/?region=EE&domain=rimi.ee", wait_until="load")
+            time.sleep(3)
+
+            # Click "See all ads" if it appears
+            expand_btn = page.locator('button:has-text("See all ads"), material-button:has-text("See all ads")')
             if expand_btn.count() > 0:
+                print("  [ACTION] Clicking 'See all ads'...")
                 expand_btn.first.click()
-                time.sleep(3)
-        except: pass
+                time.sleep(4)
 
-        # Deep scroll for Rimi (80 scrolls as requested to ensure lazy load)
-        print("  [ACTION] Scrolling 80 times to load all Media House / Rimi ads...")
-        for i in range(80):
-            page.evaluate("window.scrollBy(0, 1500)")
-            if i % 20 == 0: time.sleep(1)
+            # Deep scroll to populate the grid (80 scrolls)
+            print("  [ACTION] Scrolling 80 times to load Media House / Rimi ads...")
+            for i in range(80):
+                page.evaluate("window.scrollBy(0, 1500)")
+                if i % 20 == 0:
+                    time.sleep(1)
 
-        grid_items = page.locator("creative-preview").all()
-        print(f"  [LOG] Scanning {len(grid_items)} grid items for Media House...")
+            grid_items = page.locator("creative-preview").all()
+            print(f"  [LOG] Scanning {len(grid_items)} grid items...")
 
-        rimi_count = 0
-        seen_ids = set()
+            rimi_count = 0
+            seen_ids = set()
 
-        # --- REFINED RIMI GRID LOGIC ---
-for item in grid_items:
-    try:
-        # 1. Grab all text inside the creative-preview block
-        # This will include "Media House OÜ" and "Verified"
-        full_card_text = item.inner_text()
-        
-        if "Media House" in full_card_text:
-            # 2. Extract the CR_ID from the href in the <a> tag
-            href_element = item.locator("a").first
-            href = href_element.get_attribute("href")
-            cr_id = re.search(r"(CR\d+)", href).group(1)
-            
-            if cr_id in seen_ids: continue
-            seen_ids.add(cr_id)
-            
-            # 3. Target the specific Rimi image container you found
-            # Your HTML shows it's inside 'html-renderer img'
-            img_tag = item.locator("html-renderer img").first
-            save_path = f"data/Rimi/{cr_id}.png"
-            
-            if img_tag.count() > 0:
-                img_url = img_tag.get_attribute("src")
-                # Direct download is faster and higher quality than a screenshot
-                if img_url and img_url.startswith("http"):
-                    response = requests.get(img_url, timeout=10)
-                    with open(save_path, "wb") as f:
-                        f.write(response.content)
-                    print(f"  [SAVED] Rimi Image: {cr_id}")
-                else:
-                    item.screenshot(path=save_path)
-            else:
-                # Fallback to screenshotting the bounding box if img is missing
-                item.locator(".creative-bounding-box").first.screenshot(path=save_path)
-            
-            rimi_count += 1
-            except:
-                continue
+            for item in grid_items:
+                try:
+                    # Logic: Look for "Media House" anywhere in the element's text
+                    if "Media House" in item.inner_text():
+                        href = item.locator("a").first.get_attribute("href")
+                        cr_id = re.search(r"(CR\d+)", href).group(1)
+                        
+                        if cr_id in seen_ids: continue
+                        seen_ids.add(cr_id)
+                        
+                        save_path = f"data/Rimi/{cr_id}.png"
+                        
+                        # Try to find the image tag first
+                        img_tag = item.locator("html-renderer img, fletch-renderer img").first
+                        if img_tag.count() > 0:
+                            img_url = img_tag.get_attribute("src")
+                            if img_url and img_url.startswith("http"):
+                                with open(save_path, "wb") as f:
+                                    f.write(requests.get(img_url).content)
+                            else:
+                                item.screenshot(path=save_path)
+                        else:
+                            # Final fallback: screenshot the ad box
+                            item.locator(".creative-bounding-box").first.screenshot(path=save_path)
+                        
+                        rimi_count += 1
+                except:
+                    continue
+        except Exception as e:
+            print(f"  [ERROR] Rimi section failed: {e}")
 
         browser.close()
-        print(f"\n--- [FINISHED] ---")
-        print(f"Total Selver Ads Saved: {len(selver_ads)}")
-        print(f"Total Rimi/Media House Ads Found: {rimi_count}")
+        print(f"\n--- [COMPLETED] ---")
+        print(f"Selver total: {len(selver_ads) if 'selver_ads' in locals() else 0}")
+        print(f"Rimi total: {rimi_count}")
 
 if __name__ == "__main__":
-    run_unlimited_scraper()
+    run_unlimited_stable_scraper()
