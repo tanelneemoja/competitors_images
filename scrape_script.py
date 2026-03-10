@@ -11,15 +11,16 @@ def run_full_competitor_scraper():
             os.makedirs(folder, exist_ok=True)
 
     with sync_playwright() as p:
-        # Set headless=False to watch the process live
-        browser = p.chromium.launch(headless=False) 
+        # headless=True for GitHub Runners/Servers; change to False to watch it locally
+        browser = p.chromium.launch(headless=True) 
         context = browser.new_context(viewport={'width': 1920, 'height': 1080})
         page = context.new_page()
 
         # --- SECTION 1: SELVER (STABLE) ---
         print("\n--- [START] Processing Selver ---")
         try:
-            page.goto("https://adstransparency.google.com/advertiser/AR08638735883022893057?region=EE", wait_until="networkidle")
+            page.goto("https://adstransparency.google.com/advertiser/AR08638735883022893057?region=EE", wait_until="domcontentloaded")
+            page.wait_for_selector("creative-preview", timeout=10000)
             
             # Scroll to load ads
             for _ in range(5):
@@ -43,7 +44,7 @@ def run_full_competitor_scraper():
         except Exception as e:
             print(f"  [ERROR] Selver section failed: {e}")
 
-        # --- SECTION 2: RIMI (REFINED DIAGNOSTIC LOGIC) ---
+        # --- SECTION 2: RIMI (INNER_TEXT DIAGNOSTIC) ---
         print("\n--- [START] Processing Rimi ---")
         try:
             page.goto("https://adstransparency.google.com/?region=EE&domain=rimi.ee", wait_until="load")
@@ -56,7 +57,7 @@ def run_full_competitor_scraper():
                 expand_btn.first.click()
                 time.sleep(4)
 
-            # Deep scroll to populate the grid (80 scrolls)
+            # Deep scroll to populate the grid (80 scrolls as requested)
             print("  [ACTION] Scrolling 80 times to load Media House / Rimi ads...")
             for i in range(80):
                 page.evaluate("window.scrollBy(0, 1500)")
@@ -71,9 +72,10 @@ def run_full_competitor_scraper():
 
             for item in grid_items:
                 try:
-                    # Logic: Look for "Media House" anywhere in the element's text
+                    # Looking for "Media House" anywhere in the item text
                     if "Media House" in item.inner_text():
-                        href = item.locator("a").first.get_attribute("href")
+                        href_el = item.locator("a").first
+                        href = href_el.get_attribute("href")
                         cr_id = re.search(r"(CR\d+)", href).group(1)
                         
                         if cr_id in seen_ids: continue
@@ -81,7 +83,7 @@ def run_full_competitor_scraper():
                         
                         save_path = f"data/Rimi/{cr_id}.png"
                         
-                        # Try to find the image tag first
+                        # Try to find the image tag for high quality
                         img_tag = item.locator("html-renderer img, fletch-renderer img").first
                         if img_tag.count() > 0:
                             img_url = img_tag.get_attribute("src")
@@ -91,7 +93,7 @@ def run_full_competitor_scraper():
                             else:
                                 item.screenshot(path=save_path)
                         else:
-                            # Final fallback: screenshot the ad box
+                            # Screenshot bounding box fallback
                             item.locator(".creative-bounding-box").first.screenshot(path=save_path)
                         
                         rimi_count += 1
@@ -106,4 +108,4 @@ def run_full_competitor_scraper():
         print(f"Rimi total: {rimi_count}")
 
 if __name__ == "__main__":
-    run_unlimited_stable_scraper()
+    run_full_competitor_scraper()
