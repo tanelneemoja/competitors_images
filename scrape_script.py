@@ -11,6 +11,7 @@ def run_full_competitor_scraper():
             os.makedirs(folder, exist_ok=True)
 
     with sync_playwright() as p:
+        # headless=True is required for GitHub/Server environments
         browser = p.chromium.launch(headless=True) 
         context = browser.new_context(viewport={'width': 1920, 'height': 1080})
         page = context.new_page()
@@ -20,12 +21,8 @@ def run_full_competitor_scraper():
         try:
             page.goto("https://adstransparency.google.com/advertiser/AR08638735883022893057?region=EE", wait_until="domcontentloaded")
             time.sleep(2)
-            for _ in range(5):
-                page.evaluate("window.scrollBy(0, 2000)")
-                time.sleep(0.5)
-
+            page.evaluate("window.scrollBy(0, 5000)")
             selver_ads = page.locator("creative-preview").all()
-            print(f"  [LOG] Found {len(selver_ads)} Selver ads.")
             for ad in selver_ads:
                 try:
                     href = ad.locator("a").first.get_attribute("href")
@@ -40,69 +37,82 @@ def run_full_competitor_scraper():
         except Exception as e:
             print(f"  [ERROR] Selver failed: {e}")
 
-        # --- SECTION 2: RIMI (DEEP DIAGNOSTIC) ---
+        # --- SECTION 2: RIMI (THE SILENT DEEP SCROLLER) ---
         print("\n--- [START] Processing Rimi ---")
         try:
             page.goto("https://adstransparency.google.com/?region=EE&domain=rimi.ee", wait_until="load")
-            time.sleep(4)
+            time.sleep(5)
 
-            expand_btn = page.locator('button:has-text("See all ads"), material-button:has-text("See all ads")')
+            # Force click "See all ads" if visible
+            expand_btn = page.get_by_role("button", name=re.compile("See all ads", re.IGNORECASE))
             if expand_btn.count() > 0:
-                print("  [ACTION] Clicking 'See all ads'...")
+                print("  [ACTION] Expanding grid...")
                 expand_btn.first.click()
-                time.sleep(5)
+                time.sleep(4)
 
-            print("  [ACTION] Scrolling 80 times...")
-            for i in range(80):
-                page.evaluate("window.scrollBy(0, 1500)")
-                if i % 20 == 0: time.sleep(1)
+            # THE STEAMROLLER SCROLLER: 150 increments of 1800px
+            print("  [ACTION] Scrolling deep into the grid (150 steps)...")
+            for i in range(150):
+                page.evaluate("window.scrollBy(0, 1800)")
+                # Minimal pause to let silent lazy-loading trigger
+                if i % 5 == 0:
+                    time.sleep(0.4)
+                if i % 30 == 0:
+                    print(f"    -> Progress: {i}/150 scrolls completed")
+            
+            # Final rest to ensure the last 800+ items are rendered
+            time.sleep(5)
 
             grid_items = page.locator("creative-preview").all()
-            print(f"  [LOG] Scanning {len(grid_items)} grid items...")
+            total_items = len(grid_items)
+            print(f"  [LOG] Scanning {total_items} total grid items...")
 
             rimi_count = 0
             seen_ids = set()
 
             for idx, item in enumerate(grid_items):
                 try:
-                    # DIAGNOSTIC: Get text via multiple methods to catch hidden text
-                    text_content = item.text_content() or ""
-                    inner_text = item.inner_text() or ""
+                    # Use text_content() to pierce through potential shadow layers
+                    raw_text = item.text_content() or ""
                     
-                    # Log the first 10 items regardless, then only every 50th or matches
-                    if idx < 10 or "Media House" in text_content or "Media House" in inner_text:
-                        clean_text = inner_text.replace('\n', ' ').strip()[:50]
-                        print(f"  [ITEM {idx}] Detected Text: [{clean_text}...]")
-
-                    if "Media House" in text_content or "Media House" in inner_text:
+                    if "Media House" in raw_text:
                         href = item.locator("a").first.get_attribute("href")
-                        cr_id = re.search(r"(CR\d+)", href).group(1)
+                        cr_id_match = re.search(r"(CR\d+)", href)
+                        if not cr_id_match: continue
+                        cr_id = cr_id_match.group(1)
                         
                         if cr_id not in seen_ids:
                             seen_ids.add(cr_id)
                             save_path = f"data/Rimi/{cr_id}.png"
                             
-                            # Use the img src we saw in your HTML snippet
+                            # Capture logic
                             img_tag = item.locator("img").first
                             if img_tag.count() > 0 and img_tag.get_attribute("src"):
                                 img_url = img_tag.get_attribute("src")
                                 with open(save_path, "wb") as f:
                                     f.write(requests.get(img_url).content)
-                                print(f"    -> [MATCH] Saved via Image URL: {cr_id}")
                             else:
-                                item.screenshot(path=save_path)
-                                print(f"    -> [MATCH] Saved via Screenshot: {cr_id}")
+                                # If no img tag, take a clean screenshot of the ad box
+                                item.locator(".creative-bounding-box").first.screenshot(path=save_path)
                             
                             rimi_count += 1
-                except Exception as e:
+                            if rimi_count % 10 == 0:
+                                print(f"  [MATCH] Saved {rimi_count} Rimi ads...")
+                                
+                    # Diagnostic status every 250 items
+                    elif idx % 250 == 0:
+                        brand_preview = raw_text[:20].strip().replace('\n', ' ')
+                        print(f"  [STATUS] Index {idx}/{total_items} | Brand: {brand_preview}...")
+
+                except Exception:
                     continue
         except Exception as e:
             print(f"  [ERROR] Rimi failed: {e}")
 
         browser.close()
-        print(f"\n--- [COMPLETED] ---")
-        print(f"Selver total: {len(selver_ads) if 'selver_ads' in locals() else 0}")
-        print(f"Rimi total: {rimi_count}")
+        print(f"\n--- [FINISHED] ---")
+        print(f"Total Selver Ads: {len(selver_ads) if 'selver_ads' in locals() else 0}")
+        print(f"Total Rimi Ads: {rimi_count}")
 
 if __name__ == "__main__":
     run_full_competitor_scraper()
