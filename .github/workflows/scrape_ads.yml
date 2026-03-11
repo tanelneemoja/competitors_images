@@ -28,7 +28,9 @@ jobs:
           playwright install --with-deps chromium
 
       - name: Run Scraper
-        run: python scrape_script.py
+        env:
+          PYTHONUNBUFFERED: "1"  # This forces logs to show up in real-time
+        run: python your_script_name.py
 
       - name: Commit and Push
         run: |
