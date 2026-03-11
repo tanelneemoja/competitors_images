@@ -4,17 +4,20 @@ import time
 import re
 from playwright.sync_api import sync_playwright
 
-def run_continuous_grid_scraper():
+def run_ar_id_scraper():
     # Setup Storage
     for folder in ['data/Selver', 'data/Rimi']:
         if not os.path.exists(folder): os.makedirs(folder, exist_ok=True)
+
+    # THE TARGET ID YOU FOUND
+    TARGET_AR_ID = "AR17608295264152453121"
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True) 
         context = browser.new_context(viewport={'width': 1920, 'height': 1080})
         page = context.new_page()
 
-        # --- SECTION 1: SELVER (STABLE) ---
+        # --- SECTION 1: SELVER ---
         print("\n--- [START] Processing Selver ---")
         page.goto("https://adstransparency.google.com/advertiser/AR08638735883022893057?region=EE", wait_until="domcontentloaded")
         time.sleep(2)
@@ -32,8 +35,8 @@ def run_continuous_grid_scraper():
                         f.write(requests.get(src).content)
             except: continue
 
-        # --- SECTION 2: RIMI (CONTINUOUS MONITORING) ---
-        print("\n--- [START] Processing Rimi ---")
+        # --- SECTION 2: RIMI (ADVERTISER ID MATCHING) ---
+        print(f"\n--- [START] Processing Rimi (Targeting {TARGET_AR_ID}) ---")
         page.goto("https://adstransparency.google.com/?region=EE&domain=rimi.ee", wait_until="load")
         time.sleep(5)
 
@@ -48,28 +51,29 @@ def run_continuous_grid_scraper():
         last_height = 0
         no_growth_count = 0
         
-        print("  [ACTION] Starting Continuous Grid Monitor...")
+        print("  [ACTION] Starting AR-ID Grid Monitor...")
 
-        # We keep going until the page height stops increasing for a while
-        while no_growth_count < 15:  # Increased tolerance for slow loading
-            # 1. TIGHT SCAN: Check every single creative-preview currently in the DOM
+        # Keep going until we hit the end of the ~800-1000 ads
+        while no_growth_count < 10:
             current_grid = page.locator("creative-preview").all()
             
             for item in current_grid:
                 try:
-                    # Get ID immediately to check if we've handled it
                     href_el = item.locator("a").first
                     href = href_el.get_attribute("href")
                     if not href: continue
-                    cr_id = re.search(r"(CR\d+)", href).group(1)
 
-                    if cr_id not in seen_ids:
-                        # NEW ID FOUND: Now check if it's Media House/Rimi
-                        raw_text = item.text_content() or ""
-                        
-                        if "Media House" in raw_text:
+                    # Check if THIS ad belongs to the target AR ID
+                    if TARGET_AR_ID in href:
+                        cr_id_match = re.search(r"(CR\d+)", href)
+                        if not cr_id_match: continue
+                        cr_id = cr_id_match.group(1)
+
+                        if cr_id not in seen_ids:
+                            seen_ids.add(cr_id)
                             save_path = f"data/Rimi/{cr_id}.png"
-                            # Try to get the image source
+                            
+                            # Capture
                             img_tag = item.locator("img").first
                             if img_tag.count() > 0 and img_tag.get_attribute("src"):
                                 img_url = img_tag.get_attribute("src")
@@ -79,16 +83,13 @@ def run_continuous_grid_scraper():
                                 item.locator(".creative-bounding-box").first.screenshot(path=save_path)
                             
                             rimi_count += 1
-                            print(f"    [MATCH] #{rimi_count} | Found Rimi/Media House (ID: {cr_id})")
-                        
-                        # Mark as seen regardless of brand so we don't re-scan it
-                        seen_ids.add(cr_id)
+                            print(f"    [MATCH] #{rimi_count} | Found via AR ID (ID: {cr_id})")
                 except:
                     continue
 
-            # 2. MICRO-SCROLL: Move just a little bit to trigger lazy loading without skipping
-            page.evaluate("window.scrollBy(0, 800)") 
-            time.sleep(0.5) # Quick pause for DOM update
+            # Micro-scroll to trigger lazy loading
+            page.evaluate("window.scrollBy(0, 1000)") 
+            time.sleep(0.8) 
             
             new_height = page.evaluate("document.body.scrollHeight")
             if new_height == last_height:
@@ -96,13 +97,10 @@ def run_continuous_grid_scraper():
             else:
                 no_growth_count = 0
                 last_height = new_height
-                if len(seen_ids) % 100 == 0:
-                    print(f"  [STATUS] Scanned {len(seen_ids)} unique ads in grid so far...")
 
         browser.close()
         print(f"\n--- [FINISHED] ---")
-        print(f"Total Unique Ads Scanned: {len(seen_ids)}")
-        print(f"Total Rimi Ads Captured: {rimi_count}")
+        print(f"Total Rimi Ads Captured via AR ID: {rimi_count}")
 
 if __name__ == "__main__":
-    run_continuous_grid_scraper()
+    run_ar_id_scraper()
