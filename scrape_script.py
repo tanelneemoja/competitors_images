@@ -1,103 +1,114 @@
 import os
 import requests
+import json
 import time
 import re
 from playwright.sync_api import sync_playwright
 
-def run_verbose_media_house_scraper():
+def run_rimi_network_deep_scan():
     for folder in ['data/Selver', 'data/Rimi']:
         if not os.path.exists(folder): os.makedirs(folder, exist_ok=True)
 
-    MEDIA_HOUSE_URL = "https://adstransparency.google.com/advertiser/AR17608295264152453121?region=EE&preset-date=Last+30+days"
+    # The domain-specific search that identifies Rimi via Media House
+    RIMI_DOMAIN_URL = "https://adstransparency.google.com/?region=EE&domain=rimi.ee"
+    TARGET_MEDIA_HOUSE_ID = "AR17608295264152453121"
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(viewport={'width': 1920, 'height': 1080})
         page = context.new_page()
 
-        # --- SECTION 1: SELVER (UNTOUCHED) ---
-        print("\n--- [START] Processing Selver ---")
-        page.goto("https://adstransparency.google.com/advertiser/AR08638735883022893057?region=EE", wait_until="domcontentloaded")
-        time.sleep(3)
-        for _ in range(3):
-            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            time.sleep(1)
-        print(f"  [LOG] Found {len(page.locator('creative-preview').all())} Selver ads.")
+        # INTERNAL TRACKING
+        stats = {"total_requests": 0, "ads_in_network": 0, "saved": 0}
 
-        # --- SECTION 2: MEDIA HOUSE (DEEP SCAN) ---
-        print(f"\n--- [START] Deep-Scanning Media House Grid ---")
-        page.goto(MEDIA_HOUSE_URL, wait_until="load")
+        # NETWORK LOGGING: Watch what Google is actually sending back
+        def handle_response(response):
+            if "SearchAds" in response.url:
+                stats["total_requests"] += 1
+                status = response.status
+                try:
+                    # Logging the raw response size to see if Google is still sending data
+                    size = len(response.body())
+                    print(f"  [NETWORK] Request #{stats['total_requests']} | Status: {status} | Size: {size} bytes")
+                except:
+                    pass
+
+        page.on("response", handle_response)
+
+        print(f"\n--- [START] Deep Network Scan: Rimi (Media House) ---")
+        page.goto(RIMI_DOMAIN_URL, wait_until="load")
         time.sleep(5)
 
-        # SCROLLING TO GET ALL 200+ ADS
+        # 1. Expand the grid
+        try:
+            expand_btn = page.get_by_role("button", name=re.compile("See all ads", re.IGNORECASE))
+            if expand_btn.count() > 0:
+                expand_btn.first.click()
+                print("  [UI] 'See all ads' clicked. Starting deep scroll...")
+                time.sleep(4)
+        except:
+            pass
+
+        # 2. Pumping Scroll to force the 178 limit
         last_height = 0
-        while True:
+        stuck_cycles = 0
+        seen_creatives = set()
+
+        while stuck_cycles < 15:
+            # Pumping: Down -> Up slightly -> Down hard
             page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
             time.sleep(2)
+            page.evaluate("window.scrollBy(0, -1000)")
+            time.sleep(0.5)
+            page.evaluate("window.scrollTo(0, document.body.scrollHeight + 500)")
+            time.sleep(2)
+
+            # Check UI Growth
+            current_ads = page.locator("creative-preview").all()
             new_height = page.evaluate("document.body.scrollHeight")
+            
+            print(f"  [SCROLL] Height: {new_height} | Ads in DOM: {len(current_ads)}")
+
             if new_height == last_height:
-                # Try a "nudge" in case it's stuck
-                page.evaluate("window.scrollBy(0, -500)")
-                time.sleep(0.5)
-                page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                time.sleep(2)
-                if page.evaluate("document.body.scrollHeight") == new_height:
-                    break
-            last_height = new_height
-            print(f"  [GRID] Current height: {last_height}...")
+                stuck_cycles += 1
+                print(f"  [WARN] No growth. Stuck cycle {stuck_cycles}/15...")
+            else:
+                stuck_cycles = 0
+                last_height = new_height
 
-        ad_elements = page.locator("creative-preview").all()
-        ad_links = []
-        for el in ad_elements:
-            try:
-                href = el.locator("a").first.get_attribute("href")
-                if href: ad_links.append("https://adstransparency.google.com" + href)
-            except: continue
-
-        print(f"  [INFO] Total ads found in grid: {len(ad_links)}")
-
-        rimi_found = 0
-        for i, ad_url in enumerate(ad_links):
-            try:
-                cr_match = re.search(r"creative/(CR\d+)", ad_url)
-                cr_id = cr_match.group(1) if cr_match else f"UNK_{i}"
-
-                page.goto(ad_url, wait_until="load")
-                time.sleep(1.5)
-
-                # VERBOSE LOGGING OF TOPIC
-                topic_locator = page.locator(".subject-matter")
-                if topic_locator.count() > 0:
-                    topic_text = topic_locator.inner_text().replace("Topic (labelled by Google):", "").strip()
-                else:
-                    topic_text = "NO TOPIC FOUND"
-
-                print(f"  [INSPECTING {i+1}/{len(ad_links)}] ID: {cr_id} | Topic: {topic_text}")
-
-                # Check for "Food and Groceries" or "Food and Drinks" based on your observation
-                if "Food" in topic_text or "Groceries" in topic_text:
-                    print(f"    >>> [MATCH] Saving Rimi Ad: {cr_id}")
+            # Process visible ads to avoid missing them if Google clears memory
+            for ad in current_ads:
+                try:
+                    href = ad.locator("a").first.get_attribute("href")
+                    if not href: continue
                     
-                    img_element = page.locator("html-renderer img").first
-                    if img_element.count() > 0:
-                        img_src = img_element.get_attribute("src")
-                        if img_src:
+                    # Ensure it is the Rimi Advertiser (Media House)
+                    if TARGET_MEDIA_HOUSE_ID not in href: continue
+
+                    cr_id = href.split("creative/")[-1].split("?")[0]
+                    if cr_id not in seen_creatives:
+                        seen_creatives.add(cr_id)
+                        
+                        img_tag = ad.locator("img").first
+                        img_src = img_tag.get_attribute("src")
+                        
+                        if img_src and "google" in img_src:
+                            save_path = f"data/Rimi/{cr_id}.png"
                             img_data = requests.get(img_src).content
-                            with open(f"data/Rimi/{cr_id}.png", "wb") as f:
+                            with open(save_path, "wb") as f:
                                 f.write(img_data)
-                            rimi_found += 1
-                            continue
-
-                    # Screenshot as backup if <img> isn't found
-                    page.locator(".creative-container").first.screenshot(path=f"data/Rimi/{cr_id}.png")
-                    rimi_found += 1
-
-            except Exception as e:
-                print(f"  [ERROR] Problem with {cr_id}: {str(e)[:50]}")
+                            stats["saved"] += 1
+                            if stats["saved"] % 20 == 0:
+                                print(f"    [SAVED] {stats['saved']} Rimi ads captured...")
+                except:
+                    continue
 
         browser.close()
+        
         print(f"\n--- [FINISHED] ---")
-        print(f"Total Rimi Ads Captured: {rimi_found}")
+        print(f"Final Count of Rimi (Media House) ads: {stats['saved']}")
+        print(f"Total Unique Ad IDs encountered: {len(seen_creatives)}")
+        print(f"Total Network Data Requests: {stats['total_requests']}")
 
 if __name__ == "__main__":
-    run_verbose_media_house_scraper()
+    run_rimi_network_deep_scan()
