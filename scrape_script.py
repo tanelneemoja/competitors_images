@@ -60,7 +60,7 @@ def run_scraper():
         except Exception as e:
             log(f"Selver Stage Error: {e}")
 
-        # --- SECTION 2: RIMI ---
+       # --- IMPROVED RIMI SECTION ---
         try:
             log("Navigating to Rimi (Domain Search)...")
             page.goto("https://adstransparency.google.com/?region=EE&domain=rimi.ee", wait_until="networkidle")
@@ -68,33 +68,37 @@ def run_scraper():
 
             btn = page.get_by_role("button", name=re.compile("See all ads", re.IGNORECASE))
             if btn.count() > 0:
-                log("[ACTION] Clicking 'See all ads' to expand Rimi grid...")
+                log("[ACTION] Expanding Rimi grid...")
                 btn.click()
                 time.sleep(10) 
-            else:
-                log("[WARN] 'See all ads' button missing. Page might be blank or auto-expanded.")
 
             rimi_saved = 0
             total_processed = 0
 
-            for i in range(50): # 50 loops to ensure we find Media House ads
+            for i in range(50):
                 all_cards = page.locator("creative-preview")
                 card_count = all_cards.count()
                 
-                # HEARTBEAT: Always log, even if 0 ads
-                log(f"  [RIMI] Loop {i}/50: {card_count} ads currently visible.")
+                log(f"  [RIMI] Loop {i}/50: {card_count} ads visible.")
 
-                if card_count == 0:
-                    log("    (No ads visible. Scrolling to trigger load...)")
-                    page.evaluate("window.scrollBy(0, 1000)")
-                    time.sleep(4)
-                    if i == 5: # Screenshot if stuck at 0
-                        page.screenshot(path="data/rimi_empty_debug.png")
-                        log("    [DEBUG] Captured 'rimi_empty_debug.png' because grid is empty.")
+                # If the count is dropping or zero, we need to be aggressive
+                if card_count < 10:
+                    log("    [WAIT] Low ad count. Pulsing scrolls to trigger lazy-load...")
+                    for _ in range(3):
+                        page.evaluate("window.scrollBy(0, 500)")
+                        time.sleep(1)
+                    page.evaluate("window.scrollBy(0, -200)") # Small scroll up to wake up JS
+                    time.sleep(3)
+                    
+                    # Re-check count after pulsing
+                    if all_cards.count() == 0 and i > 10:
+                        log("    [FINISH] No more ads loading after multiple pulses.")
+                        break
                     continue
 
                 cards_list = all_cards.all()
-                for card in cards_list[:15]: 
+                # Process more per loop to stay ahead of the loader
+                for card in cards_list[:20]: 
                     total_processed += 1
                     try:
                         name_el = card.locator(".advertiser-name")
@@ -110,17 +114,14 @@ def run_scraper():
                                     with open(f"data/Rimi/{cr_id}.png", "wb") as f:
                                         f.write(requests.get(img_src, timeout=10).content)
                                     rimi_saved += 1
-                                    log(f"    MATCH: Saved Media House Ad {cr_id}")
-                            else:
-                                # Log occasionally so you know it's working
-                                if total_processed % 20 == 0:
-                                    log(f"    (Skipping ad by: {adv_name})")
-
-                        # PURGE: Delete from DOM to prevent "Again and Again"
+                                    log(f"    *** FOUND: Media House Ad {cr_id} ***")
+                        
+                        # PURGE immediately
                         page.evaluate("(el) => el.remove()", card.element_handle())
                     except: continue
 
-                page.evaluate("window.scrollBy(0, 600)")
+                # Standard scroll after a batch
+                page.evaluate("window.scrollBy(0, 800)")
                 time.sleep(2)
 
         except Exception as e:
