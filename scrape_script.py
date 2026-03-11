@@ -2,113 +2,95 @@ import os
 import requests
 import time
 import re
-import random
 from playwright.sync_api import sync_playwright
 
-def run_final_integrated_scraper():
+def run_targeted_rimi_scraper():
     # Setup Storage
     for folder in ['data/Selver', 'data/Rimi']:
         if not os.path.exists(folder): os.makedirs(folder, exist_ok=True)
 
-    TARGET_AR_ID = "AR17608295264152453121"
+    # Rimi / Media House Target
+    MEDIA_HOUSE_URL = "https://adstransparency.google.com/advertiser/AR17608295264152453121?region=EE&preset-date=Last+30+days"
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True) 
+        browser = p.chromium.launch(headless=True)
         context = browser.new_context(viewport={'width': 1920, 'height': 1080})
         page = context.new_page()
 
-        # --- SECTION 1: SELVER (Restored) ---
+        # --- SECTION 1: SELVER (UNTOUCHED) ---
         print("\n--- [START] Processing Selver ---")
         try:
             page.goto("https://adstransparency.google.com/advertiser/AR08638735883022893057?region=EE", wait_until="domcontentloaded")
             time.sleep(3)
-            # Scroll a few times for Selver
             for _ in range(3):
                 page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                 time.sleep(1)
             selver_ads = page.locator("creative-preview").all()
             print(f"  [LOG] Found {len(selver_ads)} Selver ads.")
-            # Note: Add capture logic here if you want to save Selver images specifically
         except Exception as e:
             print(f"  [ERROR] Selver failed: {e}")
 
-        # --- SECTION 2: RIMI (Anchor-Based Pumping) ---
-        print(f"\n--- [START] Processing Rimi (Targeting {TARGET_AR_ID}) ---")
-        page.goto("https://adstransparency.google.com/?region=EE&domain=rimi.ee", wait_until="load")
+        # --- SECTION 2: RIMI / MEDIA HOUSE (TOPIC FILTERING) ---
+        print(f"\n--- [START] Processing Media House for Rimi Topics ---")
+        page.goto(MEDIA_HOUSE_URL, wait_until="load")
         time.sleep(5)
 
-        try:
-            expand_btn = page.get_by_role("button", name=re.compile("See all ads", re.IGNORECASE))
-            if expand_btn.count() > 0:
-                expand_btn.first.click()
-                time.sleep(4)
-        except: pass
+        # Get all individual ad links from the grid
+        ad_elements = page.locator("creative-preview").all()
+        ad_links = []
+        for el in ad_elements:
+            try:
+                href = el.locator("a").first.get_attribute("href")
+                if href: ad_links.append("https://adstransparency.google.com" + href)
+            except: continue
 
-        seen_ids = set()
-        rimi_count = 0
-        stuck_count = 0
-        
-        print("  [ACTION] Using Anchor-Element Scrolling (targeting last ad in DOM)...")
+        print(f"  [INFO] Found {len(ad_links)} total ads to inspect for Media House.")
 
-        while stuck_count < 30:
-            current_ads = page.locator("creative-preview").all()
-            found_new_in_loop = False
+        rimi_found = 0
+        for ad_url in ad_links:
+            try:
+                # Extract CR ID for naming
+                cr_match = re.search(r"creative/(CR\d+)", ad_url)
+                cr_id = cr_match.group(1) if cr_match else "UNKNOWN"
 
-            for item in current_ads:
-                try:
-                    href = item.locator("a").first.get_attribute("href")
-                    if not href: continue
+                # Navigate to the specific ad detail page
+                page.goto(ad_url, wait_until="load")
+                time.sleep(2)
 
-                    ar_match = re.search(r"advertiser/(AR\d+)", href)
-                    current_ar = ar_match.group(1) if ar_match else "UNKNOWN"
-                    cr_match = re.search(r"creative/(CR\d+)", href)
-                    cr_id = cr_match.group(1) if cr_match else "UNKNOWN"
+                # CHECK TOPIC: "Food and Groceries"
+                # Based on your HTML: <div class="property subject-matter">
+                topic_locator = page.locator(".subject-matter")
+                topic_text = topic_locator.inner_text() if topic_locator.count() > 0 else ""
 
-                    if cr_id not in seen_ids:
-                        seen_ids.add(cr_id)
-                        found_new_in_loop = True
-                        
-                        if current_ar == TARGET_AR_ID:
-                            save_path = f"data/Rimi/{cr_id}.png"
-                            img_tag = item.locator("img").first
-                            if img_tag.count() > 0 and img_tag.get_attribute("src"):
-                                with open(save_path, "wb") as f:
-                                    f.write(requests.get(img_tag.get_attribute("src")).content)
-                            else:
-                                item.locator(".creative-bounding-box").first.screenshot(path=save_path)
-                            rimi_count += 1
-                            print(f"    [MATCH] Saved Rimi Ad #{rimi_count}")
-                except: continue
+                if "Food and Groceries" in topic_text:
+                    print(f"  [MATCH] Found Rimi Ad ({cr_id}) - Topic: {topic_text}")
+                    
+                    # Target the specific image inside html-renderer
+                    img_element = page.locator("html-renderer img").first
+                    img_src = img_element.get_attribute("src")
 
-            if found_new_in_loop:
-                stuck_count = 0
-                # --- THE ANCHOR MOVE ---
-                # Find the last element currently in the DOM and scroll it into view
-                if len(current_ads) > 0:
-                    last_ad = current_ads[-1]
-                    last_ad.scroll_into_view_if_needed()
-                    print(f"  [PROGRESS] Scanned {len(seen_ids)} ads. Anchored to last item.")
-                
-                # Small mouse wheel nudge to simulate activity
-                page.mouse.wheel(0, 500)
-                time.sleep(1.5)
-            else:
-                stuck_count += 1
-                # --- THE RESET PUMP ---
-                # Move up significantly to "un-trigger" the observer
-                retreat = random.randint(1500, 3000)
-                page.evaluate(f"window.scrollBy(0, -{retreat})")
-                time.sleep(1)
-                # Slam back to the bottom ad
-                if len(current_ads) > 0:
-                    current_ads[-1].scroll_into_view_if_needed()
-                print(f"  [STUCK {stuck_count}/30] Resetting viewport...")
-                time.sleep(3)
+                    if img_src:
+                        save_path = f"data/Rimi/{cr_id}.png"
+                        img_data = requests.get(img_src).content
+                        with open(save_path, "wb") as f:
+                            f.write(img_data)
+                        rimi_found += 1
+                    else:
+                        # Fallback to screenshot of the creative container if direct img fails
+                        page.locator(".creative-container").first.screenshot(path=f"data/Rimi/{cr_id}.png")
+                        rimi_found += 1
+                else:
+                    # It's Media House, but maybe a different client (Henkel, etc.)
+                    pass
+
+            except Exception as e:
+                print(f"  [SKIP] Error inspecting {ad_url}: {e}")
+                continue
 
         browser.close()
         print(f"\n--- [FINISHED] ---")
-        print(f"Total Unique Ads Scanned: {len(seen_ids)}")
-        print(f"Total Rimi Ads Captured: {rimi_count}")
+        print(f"Total Media House Ads inspected: {len(ad_links)}")
+        print(f"Total Rimi (Food & Groceries) ads captured: {rimi_found}")
 
 if __name__ == "__main__":
-    run_final_integrated_scraper()
+    run_targeted_rimi_scraper()
