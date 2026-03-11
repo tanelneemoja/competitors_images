@@ -30,7 +30,7 @@ jobs:
       - name: Run Scraper
         env:
           PYTHONUNBUFFERED: "1"  # This forces logs to show up in real-time
-        run: python your_script_name.py
+        run: python scrape_script.py
 
       - name: Commit and Push
         run: |
