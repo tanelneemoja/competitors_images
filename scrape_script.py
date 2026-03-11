@@ -5,18 +5,35 @@ import re
 import random
 from playwright.sync_api import sync_playwright
 
-def run_human_behavior_scraper():
+def run_final_integrated_scraper():
+    # Setup Storage
     for folder in ['data/Selver', 'data/Rimi']:
         if not os.path.exists(folder): os.makedirs(folder, exist_ok=True)
 
-    TARGET_ID = "AR17608295264152453121"
-    
+    TARGET_AR_ID = "AR17608295264152453121"
+
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True) 
         context = browser.new_context(viewport={'width': 1920, 'height': 1080})
         page = context.new_page()
 
-        print(f"\n--- [START] Human-Behavior Scan for Rimi ---")
+        # --- SECTION 1: SELVER (Restored) ---
+        print("\n--- [START] Processing Selver ---")
+        try:
+            page.goto("https://adstransparency.google.com/advertiser/AR08638735883022893057?region=EE", wait_until="domcontentloaded")
+            time.sleep(3)
+            # Scroll a few times for Selver
+            for _ in range(3):
+                page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                time.sleep(1)
+            selver_ads = page.locator("creative-preview").all()
+            print(f"  [LOG] Found {len(selver_ads)} Selver ads.")
+            # Note: Add capture logic here if you want to save Selver images specifically
+        except Exception as e:
+            print(f"  [ERROR] Selver failed: {e}")
+
+        # --- SECTION 2: RIMI (Anchor-Based Pumping) ---
+        print(f"\n--- [START] Processing Rimi (Targeting {TARGET_AR_ID}) ---")
         page.goto("https://adstransparency.google.com/?region=EE&domain=rimi.ee", wait_until="load")
         time.sleep(5)
 
@@ -24,22 +41,20 @@ def run_human_behavior_scraper():
             expand_btn = page.get_by_role("button", name=re.compile("See all ads", re.IGNORECASE))
             if expand_btn.count() > 0:
                 expand_btn.first.click()
-                time.sleep(5)
+                time.sleep(4)
         except: pass
 
         seen_ids = set()
         rimi_count = 0
-        last_height = 0
         stuck_count = 0
         
-        print("  [ACTION] Using Mouse-Wheel simulation and erratic pumping...")
+        print("  [ACTION] Using Anchor-Element Scrolling (targeting last ad in DOM)...")
 
-        while stuck_count < 25:
-            # 1. Capture current view
-            current_grid = page.locator("creative-preview").all()
-            found_new_this_loop = False
+        while stuck_count < 30:
+            current_ads = page.locator("creative-preview").all()
+            found_new_in_loop = False
 
-            for item in current_grid:
+            for item in current_ads:
                 try:
                     href = item.locator("a").first.get_attribute("href")
                     if not href: continue
@@ -51,9 +66,9 @@ def run_human_behavior_scraper():
 
                     if cr_id not in seen_ids:
                         seen_ids.add(cr_id)
-                        found_new_this_loop = True
+                        found_new_in_loop = True
                         
-                        if current_ar == TARGET_ID:
+                        if current_ar == TARGET_AR_ID:
                             save_path = f"data/Rimi/{cr_id}.png"
                             img_tag = item.locator("img").first
                             if img_tag.count() > 0 and img_tag.get_attribute("src"):
@@ -65,27 +80,30 @@ def run_human_behavior_scraper():
                             print(f"    [MATCH] Saved Rimi Ad #{rimi_count}")
                 except: continue
 
-            # 2. THE HUMAN SCROLL MOVE
-            # Instead of one big jump, we do multiple small "mouse wheel" rolls
-            for _ in range(5):
-                page.mouse.wheel(0, 400)
-                time.sleep(0.2)
-
-            # 3. THE "UP-DOWN" RESET (The fix you found)
-            current_height = page.evaluate("document.body.scrollHeight")
-            if current_height == last_height:
-                stuck_count += 1
-                # Erratic retreat: Scroll up by a random amount to confuse the observer
-                retreat_val = random.randint(800, 2000)
-                print(f"  [STUCK] No height growth. Retreating {retreat_val}px and slamming down...")
-                page.evaluate(f"window.scrollBy(0, -{retreat_val})")
-                time.sleep(1)
-                page.evaluate("window.scrollTo(0, document.body.scrollHeight + 500)")
-                time.sleep(3) # Long wait for network
-            else:
+            if found_new_in_loop:
                 stuck_count = 0
-                last_height = current_height
-                print(f"  [PROGRESS] Scanned {len(seen_ids)} ads | Height: {current_height}")
+                # --- THE ANCHOR MOVE ---
+                # Find the last element currently in the DOM and scroll it into view
+                if len(current_ads) > 0:
+                    last_ad = current_ads[-1]
+                    last_ad.scroll_into_view_if_needed()
+                    print(f"  [PROGRESS] Scanned {len(seen_ids)} ads. Anchored to last item.")
+                
+                # Small mouse wheel nudge to simulate activity
+                page.mouse.wheel(0, 500)
+                time.sleep(1.5)
+            else:
+                stuck_count += 1
+                # --- THE RESET PUMP ---
+                # Move up significantly to "un-trigger" the observer
+                retreat = random.randint(1500, 3000)
+                page.evaluate(f"window.scrollBy(0, -{retreat})")
+                time.sleep(1)
+                # Slam back to the bottom ad
+                if len(current_ads) > 0:
+                    current_ads[-1].scroll_into_view_if_needed()
+                print(f"  [STUCK {stuck_count}/30] Resetting viewport...")
+                time.sleep(3)
 
         browser.close()
         print(f"\n--- [FINISHED] ---")
@@ -93,4 +111,4 @@ def run_human_behavior_scraper():
         print(f"Total Rimi Ads Captured: {rimi_count}")
 
 if __name__ == "__main__":
-    run_human_behavior_scraper()
+    run_final_integrated_scraper()
