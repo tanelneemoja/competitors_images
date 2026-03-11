@@ -9,15 +9,12 @@ def log(msg):
     print(f"[{timestamp}] {msg}", flush=True)
 
 def run_scraper():
-    log("!!! STARTING PROTECTED SEQUENCE !!!")
+    log("!!! STARTING HIGH-VISIBILITY CRAWLER !!!")
     for folder in ['data/Selver', 'data/Rimi']:
         os.makedirs(folder, exist_ok=True)
 
-    # Safety configurations
-    MAX_RELOADS = 3
-    STALL_THRESHOLD = 5 # Loops with same count before reloading
-
     with sync_playwright() as p:
+        log("Launching Browser...")
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(viewport={'width': 1280, 'height': 1200})
         page = context.new_page()
@@ -26,12 +23,11 @@ def run_scraper():
         try:
             log("--- [STAGE 1] SELVER ---")
             page.goto("https://adstransparency.google.com/advertiser/AR08638735883022893057?region=EE", wait_until="networkidle")
-            time.sleep(8)
-            
+            time.sleep(5)
             sel_ids = set()
-            for s in range(15):
+            for s in range(12):
                 cards = page.locator("creative-preview").all()
-                found_in_loop = 0
+                new_in_loop = 0
                 for card in cards:
                     try:
                         h = card.locator("a").first.get_attribute("href", timeout=500)
@@ -42,88 +38,97 @@ def run_scraper():
                                 with open(f"data/Selver/{cid}.png", "wb") as f:
                                     f.write(requests.get(img_url, timeout=5).content)
                                 sel_ids.add(cid)
-                                found_in_loop += 1
+                                new_in_loop += 1
                     except: continue
-                
-                log(f"  Loop {s}: +{found_in_loop} ads. Total: {len(sel_ids)}")
-                page.evaluate("window.scrollBy(0, 2000)")
-                time.sleep(3)
-        except Exception as e: log(f"Selver Err: {e}")
+                log(f"  Loop {s}: Found {new_in_loop} new ads. (Total: {len(sel_ids)})")
+                page.evaluate("window.scrollBy(0, 1500)")
+                time.sleep(2)
+        except Exception as e: log(f"Selver Error: {e}")
 
         # --- STAGE 2: RIMI ---
         try:
-            log("--- [STAGE 2] RIMI ---")
+            log("--- [STAGE 2] RIMI (Deep Scan) ---")
             page.goto("https://adstransparency.google.com/?region=EE&domain=rimi.ee", wait_until="networkidle")
             time.sleep(10)
 
             btn = page.get_by_role("button", name=re.compile("See all ads", re.IGNORECASE))
             if btn.count() > 0:
+                log("[ACTION] Clicking 'See all ads' to initialize 800-ad grid...")
                 btn.click()
                 time.sleep(10)
 
             rimi_saved = 0
             seen_ids = set()
             last_count = 0
-            stall_counter = 0
-            reload_count = 0
+            stall_count = 0
 
-            for i in range(60):
+            # 250 loops to ensure we cover the 800 ads at a safe pace
+            for i in range(250):
                 all_cards = page.locator("creative-preview")
                 current_count = all_cards.count()
                 
-                log(f"  [RIMI] Loop {i}: {current_count} ads visible. (Stall: {stall_counter}/{STALL_THRESHOLD})")
+                # STATUS LOG
+                log(f"  [RIMI] Loop {i}: {current_count} ads in DOM | Target: ~800 | Saved: {rimi_saved}")
 
-                # Stall Detection Logic
-                if current_count > 0 and current_count == last_count:
-                    stall_counter += 1
+                if current_count == last_count and current_count > 0:
+                    stall_count += 1
                 else:
-                    stall_counter = 0
-                
+                    stall_count = 0
                 last_count = current_count
 
-                if stall_counter >= STALL_THRESHOLD:
-                    if reload_count < MAX_RELOADS:
-                        reload_count += 1
-                        log(f"  [CRITICAL] Stall detected! Reloading ({reload_count}/{MAX_RELOADS})...")
-                        page.reload(wait_until="networkidle")
-                        time.sleep(10)
-                        stall_counter = 0
-                        continue
-                    else:
-                        log("  [HALT] Max reloads reached. Moving to final report.")
+                # THE KICK (To bypass the 218 wall)
+                if stall_count >= 4:
+                    log(f"  [ATTENTION] Stall detected ({stall_count}/10). Performing Scroll-Kick...")
+                    page.evaluate("window.scrollBy(0, -1200)") # Kick Up
+                    time.sleep(1)
+                    page.evaluate("window.scrollTo(0, document.body.scrollHeight)") # Kick Down
+                    time.sleep(7) # Extra time for the loader to respond
+                    
+                    if stall_count >= 12:
+                        log("  [HALT] Loader stopped responding. Ending Rimi stage.")
                         break
 
-                if current_count == 0:
-                    page.evaluate("window.scrollBy(0, 1500)")
-                    time.sleep(5)
-                    continue
-
-                # Content Scan
                 cards_list = all_cards.all()
+                processed_this_loop = 0
+                
                 for card in cards_list:
                     try:
-                        h = card.locator("a").first.get_attribute("href", timeout=500)
+                        h = card.locator("a").first.get_attribute("href", timeout=300)
+                        if not h: continue
                         cid = h.split("creative/")[-1].split("?")[0]
-                        if cid in seen_ids: continue
+                        
+                        if cid in seen_ids: 
+                            continue # Skip ads we've already checked
+                        
                         seen_ids.add(cid)
+                        processed_this_loop += 1
                         
                         name_el = card.locator(".advertiser-name")
                         if name_el.count() > 0:
-                            if "Media House" in name_el.first.inner_text():
+                            adv_name = name_el.first.inner_text().strip()
+                            if "Media House" in adv_name:
                                 img = card.locator("img").first.get_attribute("src")
-                                with open(f"data/Rimi/{cid}.png", "wb") as f:
-                                    f.write(requests.get(img, timeout=5).content)
-                                rimi_saved += 1
-                                log(f"    >>> MATCH: {cid}")
+                                if img and "http" in img:
+                                    with open(f"data/Rimi/{cid}.png", "wb") as f:
+                                        f.write(requests.get(img, timeout=5).content)
+                                    rimi_saved += 1
+                                    log(f"    *** MATCH: Saved Media House Ad ({cid}) ***")
                     except: continue
 
-                page.evaluate("window.scrollBy(0, 1800)")
-                time.sleep(4)
+                if processed_this_loop > 0:
+                    log(f"    (Scan: {processed_this_loop} new ads checked this loop)")
 
-        except Exception as e: log(f"Rimi Err: {e}")
+                # Steady, incremental scrolling
+                page.evaluate("window.scrollBy(0, 1100)")
+                time.sleep(3)
+
+        except Exception as e: log(f"Rimi Error: {e}")
 
         browser.close()
-        log(f"!!! FINAL REPORT !!! Selver: {len(sel_ids) if 'sel_ids' in locals() else 0} | Rimi: {rimi_saved}")
+        log("--- FINAL SCRAPER REPORT ---")
+        log(f"Selver Ads: {len(sel_ids) if 'sel_ids' in locals() else 0}")
+        log(f"Rimi (Media House) Ads: {rimi_saved}")
+        log("!!! PROCESS COMPLETE !!!")
 
 if __name__ == "__main__":
     run_scraper()
