@@ -5,131 +5,106 @@ import re
 import sys
 from playwright.sync_api import sync_playwright
 
-# FORCES immediate log visibility in GitHub Actions
 def log(msg):
     timestamp = time.strftime("%H:%M:%S")
     print(f"[{timestamp}] {msg}", flush=True)
 
 def run_scraper():
-    log("!!! SCRIPT STARTING !!!")
-    
+    log("!!! STARTING BOOT SEQUENCE !!!")
     for folder in ['data/Selver', 'data/Rimi']:
         os.makedirs(folder, exist_ok=True)
-        log(f"Verified directory: {folder}")
 
     with sync_playwright() as p:
-        log("Launching Headless Chromium...")
         browser = p.chromium.launch(headless=True)
-        context = browser.new_context(
-            viewport={'width': 1280, 'height': 800},
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"
-        )
+        context = browser.new_context(viewport={'width': 1280, 'height': 1000})
         page = context.new_page()
-        page.set_default_timeout(60000)
-
-        # --- SECTION 1: SELVER ---
+        
+        # --- SELVER (Keep it fast) ---
         try:
-            log("Navigating to Selver (Direct ID)...")
+            log("Stage 1: Selver")
             page.goto("https://adstransparency.google.com/advertiser/AR08638735883022893057?region=EE", wait_until="networkidle")
             time.sleep(5)
-            
-            selver_ids = set()
-            for s in range(10):
+            sel_ids = set()
+            for _ in range(5):
                 cards = page.locator("creative-preview").all()
-                log(f"  [SELVER] Loop {s}: Found {len(cards)} cards on screen.")
-                
                 for card in cards:
                     try:
-                        href = card.locator("a").first.get_attribute("href", timeout=1000)
-                        cr_id = href.split("creative/")[-1].split("?")[0]
-                        if cr_id not in selver_ids:
-                            img = card.locator("img").first.get_attribute("src", timeout=1000)
-                            if img:
-                                with open(f"data/Selver/{cr_id}.png", "wb") as f:
-                                    f.write(requests.get(img, timeout=10).content)
-                                selver_ids.add(cr_id)
-                                log(f"    + Saved Selver Ad: {cr_id}")
-                        
-                        # Remove to keep DOM clean
+                        h = card.locator("a").first.get_attribute("href")
+                        cid = h.split("creative/")[-1].split("?")[0]
+                        if cid not in sel_ids:
+                            img = card.locator("img").first.get_attribute("src")
+                            with open(f"data/Selver/{cid}.png", "wb") as f:
+                                f.write(requests.get(img).content)
+                            sel_ids.add(cid)
                         page.evaluate("(el) => el.remove()", card.element_handle())
                     except: continue
-                
                 page.evaluate("window.scrollBy(0, 1000)")
-                log(f"  [SELVER] Total so far: {len(selver_ids)}")
-                time.sleep(2)
-        except Exception as e:
-            log(f"Selver Stage Error: {e}")
+                log(f"  Selver: {len(sel_ids)} ads.")
+        except Exception as e: log(f"Selver Err: {e}")
 
-       # --- IMPROVED RIMI SECTION ---
+        # --- RIMI (The Loop Breaker) ---
         try:
-            log("Navigating to Rimi (Domain Search)...")
+            log("Stage 2: Rimi (Media House Search)")
             page.goto("https://adstransparency.google.com/?region=EE&domain=rimi.ee", wait_until="networkidle")
             time.sleep(8)
 
             btn = page.get_by_role("button", name=re.compile("See all ads", re.IGNORECASE))
             if btn.count() > 0:
-                log("[ACTION] Expanding Rimi grid...")
                 btn.click()
-                time.sleep(10) 
+                log("Expanded Grid. Waiting for load...")
+                time.sleep(10)
 
             rimi_saved = 0
-            total_processed = 0
+            seen_this_session = set()
 
-            for i in range(50):
+            for i in range(60):
                 all_cards = page.locator("creative-preview")
-                card_count = all_cards.count()
-                
-                log(f"  [RIMI] Loop {i}/50: {card_count} ads visible.")
+                count = all_cards.count()
+                log(f"  [RIMI] Loop {i}: {count} ads on screen.")
 
-                # If the count is dropping or zero, we need to be aggressive
-                if card_count < 10:
-                    log("    [WAIT] Low ad count. Pulsing scrolls to trigger lazy-load...")
-                    for _ in range(3):
-                        page.evaluate("window.scrollBy(0, 500)")
-                        time.sleep(1)
-                    page.evaluate("window.scrollBy(0, -200)") # Small scroll up to wake up JS
-                    time.sleep(3)
-                    
-                    # Re-check count after pulsing
-                    if all_cards.count() == 0 and i > 10:
-                        log("    [FINISH] No more ads loading after multiple pulses.")
-                        break
+                if count < 5:
+                    log("  [PULSE] Page empty or stale. Teleporting scroll...")
+                    page.evaluate("window.scrollBy(0, 2000)")
+                    time.sleep(5)
                     continue
 
                 cards_list = all_cards.all()
-                # Process more per loop to stay ahead of the loader
-                for card in cards_list[:20]: 
-                    total_processed += 1
+                for card in cards_list:
                     try:
+                        # Get ID first to see if we've already "deleted" this one
+                        h = card.locator("a").first.get_attribute("href", timeout=500)
+                        cid = h.split("creative/")[-1].split("?")[0]
+                        
+                        if cid in seen_this_session:
+                            page.evaluate("(el) => el.remove()", card.element_handle())
+                            continue
+                        
+                        seen_this_session.add(cid)
+                        
+                        # Check for Media House
                         name_el = card.locator(".advertiser-name")
                         if name_el.count() > 0:
-                            adv_name = name_el.first.inner_text().strip()
-                            
-                            if "Media House" in adv_name:
-                                href = card.locator("a").first.get_attribute("href")
-                                cr_id = href.split("creative/")[-1].split("?")[0]
-                                
-                                if not os.path.exists(f"data/Rimi/{cr_id}.png"):
-                                    img_src = card.locator("img").first.get_attribute("src")
-                                    with open(f"data/Rimi/{cr_id}.png", "wb") as f:
-                                        f.write(requests.get(img_src, timeout=10).content)
+                            adv = name_el.first.inner_text().strip()
+                            if "Media House" in adv:
+                                if not os.path.exists(f"data/Rimi/{cid}.png"):
+                                    img = card.locator("img").first.get_attribute("src")
+                                    with open(f"data/Rimi/{cid}.png", "wb") as f:
+                                        f.write(requests.get(img).content)
                                     rimi_saved += 1
-                                    log(f"    *** FOUND: Media House Ad {cr_id} ***")
-                        
-                        # PURGE immediately
-                        page.evaluate("(el) => el.remove()", card.element_handle())
+                                    log(f"    !!! SAVED MEDIA HOUSE: {cid}")
+
+                        # FORCE REMOVAL via CSS + Remove (The One-Two Punch)
+                        page.evaluate("(el) => { el.style.display = 'none'; el.remove(); }", card.element_handle())
                     except: continue
 
-                # Standard scroll after a batch
-                page.evaluate("window.scrollBy(0, 800)")
+                # After clearing a batch, jump deep
+                page.evaluate("window.scrollBy(0, 1200)")
                 time.sleep(2)
 
-        except Exception as e:
-            log(f"Rimi Stage Error: {e}")
+        except Exception as e: log(f"Rimi Err: {e}")
 
         browser.close()
-        log("!!! SCRIPT FINISHED !!!")
-        log(f"Final Count -> Selver: {len(selver_ids) if 'selver_ids' in locals() else 0} | Rimi: {rimi_saved}")
+        log(f"COMPLETE. Selver: {len(sel_ids)} | Rimi: {rimi_saved}")
 
 if __name__ == "__main__":
     run_scraper()
