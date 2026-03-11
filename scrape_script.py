@@ -9,10 +9,11 @@ def log(msg):
     print(f"[{timestamp}] {msg}", flush=True)
 
 def run_scraper():
-    log("!!! STARTING REFINED SEGMENTED CRAWLER !!!")
+    log("!!! STARTING BRUTE-FORCE LOGGING CRAWLER !!!")
     for folder in ['data/Selver', 'data/Rimi']:
         os.makedirs(folder, exist_ok=True)
 
+    # Date ranges per your requirement
     date_chunks = [
         ("2026-03-01", "2026-03-11"),
         ("2026-02-01", "2026-02-28"),
@@ -28,89 +29,103 @@ def run_scraper():
         page = context.new_page()
 
         # --- STAGE 1: SELVER ---
+        log("--- [STAGE 1] SELVER (Standard Scan) ---")
         sel_ids = set()
         try:
-            log("--- [STAGE 1] SELVER ---")
             page.goto("https://adstransparency.google.com/advertiser/AR08638735883022893057?region=EE", wait_until="networkidle")
             time.sleep(5)
-            for s in range(8):
+            for s in range(5):
                 cards = page.locator("creative-preview").all()
                 for card in cards:
                     try:
-                        h = card.locator("a").first.get_attribute("href", timeout=500)
+                        h = card.locator("a").first.get_attribute("href")
                         cid = h.split("creative/")[-1].split("?")[0]
                         if cid not in sel_ids:
-                            img_url = card.locator("img").first.get_attribute("src", timeout=500)
-                            if img_url:
+                            img = card.locator("img").first.get_attribute("src")
+                            if img:
                                 with open(f"data/Selver/{cid}.png", "wb") as f:
-                                    f.write(requests.get(img_url).content)
+                                    f.write(requests.get(img).content)
                                 sel_ids.add(cid)
                     except: continue
-                page.evaluate("window.scrollBy(0, 1500)")
+                page.evaluate("window.scrollBy(0, 1000)")
                 time.sleep(2)
-            log(f"  Selver Done: {len(sel_ids)}")
-        except Exception as e: log(f"Selver Err: {e}")
+            log(f"  [SELVER] Found {len(sel_ids)} ads.")
+        except Exception as e: log(f"Selver Error: {e}")
 
         # --- STAGE 2: RIMI ---
-        log("--- [STAGE 2] RIMI ---")
+        log("--- [STAGE 2] RIMI (Brute-Force Matcher) ---")
         rimi_saved = 0
-        # IMPORTANT: Fresh set for Rimi so Selver IDs don't cause skips
-        rimi_seen = set() 
+        seen_ids = set()
+        
+        # Target IDs and Names from your HTML
+        TARGET_ID = "AR17608295264152453121"
+        TARGET_NAME = "media house"
 
         for start_date, end_date in date_chunks:
-            log(f"  [RANGE] {start_date} to {end_date}")
+            log(f"  [STARTING RANGE] {start_date} to {end_date}")
             url = f"https://adstransparency.google.com/?region=EE&domain=rimi.ee&start-date={start_date}&end-date={end_date}"
             
             try:
                 page.goto(url, wait_until="networkidle")
                 time.sleep(8)
 
+                # Initialize grid
                 btn = page.get_by_role("button", name=re.compile("See all ads", re.IGNORECASE))
                 if btn.count() > 0:
                     btn.click()
                     time.sleep(8)
-
+                
                 for i in range(15):
-                    all_cards = page.locator("creative-preview")
-                    cards_list = all_cards.all()
+                    cards = page.locator("creative-preview").all()
+                    processed_this_loop = 0
+                    matches_this_loop = 0
                     
-                    found_now = 0
-                    for card in cards_list:
+                    for card in cards:
                         try:
-                            h = card.locator("a").first.get_attribute("href", timeout=300)
-                            if not h: continue
-                            cid = h.split("creative/")[-1].split("?")[0]
+                            # 1. Get unique ID
+                            inner_html = card.inner_html()
+                            h_elem = card.locator("a").first
+                            href = h_elem.get_attribute("href")
+                            if not href: continue
                             
-                            if cid in rimi_seen: continue
-                            rimi_seen.add(cid)
+                            creative_id = href.split("creative/")[-1].split("?")[0]
                             
-                            # Broadened check for Media House
-                            name_el = card.locator(".advertiser-name")
-                            if name_el.count() > 0:
-                                adv_text = name_el.first.inner_text().lower()
-                                if "media house" in adv_text:
-                                    img = card.locator("img").first.get_attribute("src")
-                                    if img:
-                                        with open(f"data/Rimi/{cid}.png", "wb") as f:
-                                            f.write(requests.get(img).content)
-                                        rimi_saved += 1
-                                        found_now += 1
-                        except: continue
+                            if creative_id in seen_ids:
+                                continue
+                            
+                            seen_ids.add(creative_id)
+                            processed_this_loop += 1
+                            
+                            # 2. BRUTE FORCE MATCHING
+                            # Check URL for Advertiser ID OR check inner text for name
+                            is_match = (TARGET_ID in href) or (TARGET_NAME in inner_html.lower())
+                            
+                            if is_match:
+                                img_tag = card.locator("img").first
+                                img_url = img_tag.get_attribute("src")
+                                
+                                if img_url:
+                                    with open(f"data/Rimi/{creative_id}.png", "wb") as f:
+                                        f.write(requests.get(img_url).content)
+                                    rimi_saved += 1
+                                    matches_this_loop += 1
+                        except Exception as e:
+                            continue
+
+                    log(f"    Loop {i}: Analyzed {processed_this_loop} ads. Matched & Saved: {matches_this_loop}. (Total: {rimi_saved})")
                     
-                    if found_now > 0:
-                        log(f"    Loop {i}: +{found_now} ads. (Total Rimi: {rimi_saved})")
-                    
-                    page.evaluate("window.scrollBy(0, 1200)")
-                    time.sleep(3)
-                    
-                    # If we see 100+ ads in the DOM and found nothing new, move on
-                    if i > 3 and found_now == 0:
+                    if processed_this_loop == 0 and i > 2:
+                        log("    [LOG] No more new ads found in this range.")
                         break
 
-            except Exception as e: continue
+                    page.evaluate("window.scrollBy(0, 1200)")
+                    time.sleep(3)
+
+            except Exception as e:
+                log(f"    [ERROR] Range failed: {e}")
 
         browser.close()
-        log(f"!!! FINISHED !!! Selver: {len(sel_ids)} | Rimi: {rimi_saved}")
+        log(f"!!! FINAL REPORT !!! Selver: {len(sel_ids)} | Rimi: {rimi_saved}")
 
 if __name__ == "__main__":
     run_scraper()
