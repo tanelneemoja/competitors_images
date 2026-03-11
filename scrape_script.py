@@ -2,21 +2,21 @@ import os
 import requests
 import time
 import re
+import random
 from playwright.sync_api import sync_playwright
 
-def run_rimi_pumping_scraper():
+def run_human_behavior_scraper():
     for folder in ['data/Selver', 'data/Rimi']:
         if not os.path.exists(folder): os.makedirs(folder, exist_ok=True)
 
     TARGET_ID = "AR17608295264152453121"
-    BLACKLIST = ["AR07548724757265383425", "AR17541344781366460417", "AR17615777268980776961"]
-
+    
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True) 
         context = browser.new_context(viewport={'width': 1920, 'height': 1080})
         page = context.new_page()
 
-        print(f"\n--- [START] Pumping Scroll Scan for Rimi ({TARGET_ID}) ---")
+        print(f"\n--- [START] Human-Behavior Scan for Rimi ---")
         page.goto("https://adstransparency.google.com/?region=EE&domain=rimi.ee", wait_until="load")
         time.sleep(5)
 
@@ -30,14 +30,15 @@ def run_rimi_pumping_scraper():
         seen_ids = set()
         rimi_count = 0
         last_height = 0
-        no_growth_count = 0
-        total_items_checked = 0
+        stuck_count = 0
         
-        print("  [ACTION] Monitoring grid with Pumping Scroll logic (Up/Down slams)...")
+        print("  [ACTION] Using Mouse-Wheel simulation and erratic pumping...")
 
-        while no_growth_count < 40:
+        while stuck_count < 25:
+            # 1. Capture current view
             current_grid = page.locator("creative-preview").all()
-            
+            found_new_this_loop = False
+
             for item in current_grid:
                 try:
                     href = item.locator("a").first.get_attribute("href")
@@ -50,8 +51,8 @@ def run_rimi_pumping_scraper():
 
                     if cr_id not in seen_ids:
                         seen_ids.add(cr_id)
-                        total_items_checked += 1
-
+                        found_new_this_loop = True
+                        
                         if current_ar == TARGET_ID:
                             save_path = f"data/Rimi/{cr_id}.png"
                             img_tag = item.locator("img").first
@@ -60,39 +61,36 @@ def run_rimi_pumping_scraper():
                                     f.write(requests.get(img_tag.get_attribute("src")).content)
                             else:
                                 item.locator(".creative-bounding-box").first.screenshot(path=save_path)
-                            
                             rimi_count += 1
-                            print(f"  [MATCH] Found Rimi Ad #{rimi_count} (ID: {cr_id})")
-                        
-                        elif current_ar not in BLACKLIST:
-                            # If we see a new ID that isn't blacklisted, let's log it just in case
-                            print(f"  [INFO] Other Advertiser: {current_ar} (Item {total_items_checked})")
-
+                            print(f"    [MATCH] Saved Rimi Ad #{rimi_count}")
                 except: continue
 
-            # --- THE PUMPING MANEUVER ---
-            # 1. Retreat up to clear the intersection observer sensor
-            page.evaluate("window.scrollBy(0, -1200)")
-            time.sleep(0.7)
-            # 2. Slam back down to the very bottom + extra 200px
-            page.evaluate("window.scrollTo(0, document.body.scrollHeight + 200)")
-            print(f"  [DEBUG] Pumping bottom (Current Scan: {total_items_checked} items)")
-            time.sleep(2.5) # Heavy wait for the network to respond
+            # 2. THE HUMAN SCROLL MOVE
+            # Instead of one big jump, we do multiple small "mouse wheel" rolls
+            for _ in range(5):
+                page.mouse.wheel(0, 400)
+                time.sleep(0.2)
 
-            new_height = page.evaluate("document.body.scrollHeight")
-            
-            if new_height == last_height:
-                no_growth_count += 1
+            # 3. THE "UP-DOWN" RESET (The fix you found)
+            current_height = page.evaluate("document.body.scrollHeight")
+            if current_height == last_height:
+                stuck_count += 1
+                # Erratic retreat: Scroll up by a random amount to confuse the observer
+                retreat_val = random.randint(800, 2000)
+                print(f"  [STUCK] No height growth. Retreating {retreat_val}px and slamming down...")
+                page.evaluate(f"window.scrollBy(0, -{retreat_val})")
+                time.sleep(1)
+                page.evaluate("window.scrollTo(0, document.body.scrollHeight + 500)")
+                time.sleep(3) # Long wait for network
             else:
-                no_growth_count = 0
-                last_height = new_height
-                if total_items_checked % 100 == 0:
-                    print(f"  [STATUS] Total unique ads seen: {total_items_checked}")
+                stuck_count = 0
+                last_height = current_height
+                print(f"  [PROGRESS] Scanned {len(seen_ids)} ads | Height: {current_height}")
 
         browser.close()
         print(f"\n--- [FINISHED] ---")
-        print(f"Total Unique Ads Scanned: {total_items_checked}")
+        print(f"Total Unique Ads Scanned: {len(seen_ids)}")
         print(f"Total Rimi Ads Captured: {rimi_count}")
 
 if __name__ == "__main__":
-    run_rimi_pumping_scraper()
+    run_human_behavior_scraper()
