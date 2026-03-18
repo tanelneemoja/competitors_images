@@ -1,90 +1,72 @@
 import os
 import requests
 import time
+import re
+import shutil
 from playwright.sync_api import sync_playwright
 
-# --- SELVER CONFIG ---
-SELVER_AR_ID = "AR07386001844390559745"
-DOMAIN = "selver.ee"
-SAVE_PATH = "data/Selver"
-
-def run_selver_sync():
-    os.makedirs(SAVE_PATH, exist_ok=True)
-    stats = {"harvested": 0, "skipped": 0, "success": 0, "failed": 0}
+def scrape_competitor_ads():
+    # URL for the specific competitor
+    search_url = "https://adstransparency.google.com/advertiser/AR08638735883022893057?region=EE&preset-date=Last+30+days"
     
+    # --- 1. CLEAN SLATE ---
+    # Wipe the local data folder so old ads from previous runs are GONE
+    if os.path.exists('data'):
+        shutil.rmtree('data')
+    os.makedirs('data', exist_ok=True)
+
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        context = browser.new_context(viewport={'width': 1920, 'height': 1080})
+        context = browser.new_context(
+            viewport={'width': 1920, 'height': 1080},
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+        )
         page = context.new_page()
-        page.set_default_timeout(60000)
 
-        print(f"📡 Navigating to {DOMAIN}...")
         try:
-            page.goto(f"https://adstransparency.google.com/?region=EE&domain={DOMAIN}", wait_until="domcontentloaded")
-            time.sleep(8) # Critical wait for grid rendering
+            print(f"Loading Advertiser Page...")
+            page.goto(search_url, wait_until="domcontentloaded", timeout=60000)
+            page.wait_for_selector(".ads-count", timeout=30000)
+            
+            # --- 2. GET TARGET COUNT ---
+            count_text = page.locator(".ads-count").inner_text()
+            max_ads = int(re.search(r"(\d+)", count_text).group(1))
+            print(f"Targeting {max_ads} ads. Starting scroll...")
 
-            # Expand grid if possible
-            expand_btn = page.get_by_role("button", name="See all ads")
-            if expand_btn.is_visible():
-                expand_btn.click()
-                time.sleep(4)
+            # --- 3. INFINITE SCROLL ---
+            # This handles the '60 vs 120' ads problem
+            last_count = 0
+            for _ in range(15): # Try scrolling up to 15 times
+                page.keyboard.press("End")
+                time.sleep(4) # Wait for Google to load more
+                current_count = page.locator("creative-preview").count()
+                print(f"Discovered {current_count}/{max_ads} ads...")
+                if current_count >= max_ads or current_count == last_count:
+                    break
+                last_count = current_count
 
-            # Hydrate the list
-            for _ in range(3):
-                page.mouse.wheel(0, 2000)
-                time.sleep(2)
-
-            # Collect IDs
-            links = page.locator('a[href*="/creative/"]').all()
-            found_ids = {link.get_attribute("href").split("/creative/")[1].split("?")[0] for link in links if link.get_attribute("href")}
-            stats["harvested"] = len(found_ids)
-
-            print(f"✅ Found {stats['harvested']} total ads for Selver.")
-
-            # Process IDs
-            for cid in list(found_ids):
-                local_file = f"{SAVE_PATH}/{cid}.jpg"
+            # --- 4. SCRAPE ALL ---
+            ads = page.locator("creative-preview").all()
+            for i, ad in enumerate(ads):
+                if i >= max_ads: break # Stop at the official UI count
                 
-                if os.path.exists(local_file):
-                    stats["skipped"] += 1
-                    continue
-
-                try:
-                    # Direct Detail Page
-                    detail_url = f"https://adstransparency.google.com/advertiser/{SELVER_AR_ID}/creative/{cid}?region=EE"
-                    page.goto(detail_url, wait_until="domcontentloaded", timeout=30000)
-                    
-                    img_el = page.locator("html-renderer img, fletch-renderer img").first
-                    img_url = img_el.get_attribute("src")
-
-                    if img_url:
-                        final_url = img_url if img_url.startswith('http') else f"https:{img_url}"
-                        res = requests.get(final_url, timeout=15)
-                        if res.status_code == 200:
-                            with open(local_file, "wb") as f:
-                                f.write(res.content)
-                            stats["success"] += 1
-                    else:
-                        stats["failed"] += 1
-                    
-                    time.sleep(1)
-                except:
-                    stats["failed"] += 1
+                link_element = ad.locator("a[href*='/creative/CR']").first
+                if link_element.count() == 0: continue
+                
+                cr_id = re.search(r"(CR\d+)", link_element.get_attribute("href")).group(1)
+                img_element = ad.locator("html-renderer img").first
+                
+                if img_element.count() > 0:
+                    src = img_element.get_attribute("src")
+                    img_data = requests.get(src).content
+                    with open(f"data/{cr_id}.png", "wb") as f:
+                        f.write(img_data)
+                    print(f"Saved ({i+1}/{max_ads}): {cr_id}")
 
         except Exception as e:
-            print(f"❌ Critical Error during navigation: {e}")
-
+            print(f"Scraper Error: {e}")
+        
         browser.close()
 
-    # --- FINAL REPORT ---
-    print("\n" + "="*30)
-    print(f"🏁 SELVER SYNC COMPLETE")
-    print(f"📦 Total Harvested: {stats['harvested']}")
-    print(f"⏩ Already in Library: {stats['skipped']}")
-    print(f"✨ New Downloads: {stats['success']}")
-    if stats["failed"] > 0:
-        print(f"⚠️ Failed/Missing: {stats['failed']}")
-    print("="*30)
-
 if __name__ == "__main__":
-    run_selver_sync()
+    scrape_competitor_ads()
