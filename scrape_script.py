@@ -2,17 +2,19 @@ import os
 import requests
 import time
 import re
+import shutil
 from playwright.sync_api import sync_playwright
- 
-# --- SELVER CONFIG ---
-# Direct link to Selver's verified advertiser page
-SEARCH_URL = "https://adstransparency.google.com/advertiser/AR07386001844390559745?region=EE"
-SAVE_PATH = "data/Selver"
 
-def scrape_selver_fast():
-    # Create folder if it doesn't exist
-    os.makedirs(SAVE_PATH, exist_ok=True)
+def scrape_competitor_ads():
+    # URL for the specific competitor
+    search_url = "https://adstransparency.google.com/advertiser/AR08638735883022893057?region=EE&preset-date=Last+30+days"
     
+    # --- 1. CLEAN SLATE ---
+    # Wipe the local data folder so old ads from previous runs are GONE
+    if os.path.exists('data'):
+        shutil.rmtree('data')
+    os.makedirs('data', exist_ok=True)
+
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(
@@ -22,69 +24,49 @@ def scrape_selver_fast():
         page = context.new_page()
 
         try:
-            print(f"🚀 Loading Selver Grid...")
-            # Use 'domcontentloaded' for maximum speed
-            page.goto(SEARCH_URL, wait_until="domcontentloaded", timeout=60000)
+            print(f"Loading Advertiser Page...")
+            page.goto(search_url, wait_until="domcontentloaded", timeout=60000)
+            page.wait_for_selector(".ads-count", timeout=30000)
             
-            # Wait for the ad counter to appear
-            page.wait_for_selector(".ads-count", timeout=20000)
+            # --- 2. GET TARGET COUNT ---
             count_text = page.locator(".ads-count").inner_text()
             max_ads = int(re.search(r"(\d+)", count_text).group(1))
-            print(f"🎯 Target: {max_ads} ads. Starting rapid scroll...")
+            print(f"Targeting {max_ads} ads. Starting scroll...")
 
-            # --- FAST SCROLL ---
+            # --- 3. INFINITE SCROLL ---
+            # This handles the '60 vs 120' ads problem
             last_count = 0
-            for _ in range(10): 
+            for _ in range(15): # Try scrolling up to 15 times
                 page.keyboard.press("End")
-                time.sleep(2) # Shortest stable wait for Google to pop new ads
+                time.sleep(4) # Wait for Google to load more
                 current_count = page.locator("creative-preview").count()
-                print(f"📡 Loaded {current_count}/{max_ads}...")
+                print(f"Discovered {current_count}/{max_ads} ads...")
                 if current_count >= max_ads or current_count == last_count:
                     break
                 last_count = current_count
 
-            # --- GRID SCRAPE ---
+            # --- 4. SCRAPE ALL ---
             ads = page.locator("creative-preview").all()
-            success_count = 0
-            skipped_count = 0
-
             for i, ad in enumerate(ads):
-                try:
-                    # 1. Get the ID
-                    link_element = ad.locator("a[href*='/creative/']").first
-                    if link_element.count() == 0: continue
-                    
-                    href = link_element.get_attribute("href")
-                    cr_id = re.search(r"(CR\d+)", href).group(1)
-                    
-                    file_name = f"{SAVE_PATH}/{cr_id}.png"
-                    
-                    # 2. Check if already downloaded
-                    if os.path.exists(file_name):
-                        skipped_count += 1
-                        continue
-
-                    # 3. Grab Image from the Grid
-                    img_element = ad.locator("img").first
-                    if img_element.count() > 0:
-                        src = img_element.get_attribute("src")
-                        if not src: continue
-                        
-                        img_data = requests.get(src, timeout=10).content
-                        with open(file_name, "wb") as f:
-                            f.write(img_data)
-                        success_count += 1
-                        print(f"✅ Saved ({i+1}): {cr_id}")
-
-                except Exception:
-                    continue 
-
-            print(f"\n✨ DONE: {success_count} New | {skipped_count} Skipped | {len(ads)} Total Found")
+                if i >= max_ads: break # Stop at the official UI count
+                
+                link_element = ad.locator("a[href*='/creative/CR']").first
+                if link_element.count() == 0: continue
+                
+                cr_id = re.search(r"(CR\d+)", link_element.get_attribute("href")).group(1)
+                img_element = ad.locator("html-renderer img").first
+                
+                if img_element.count() > 0:
+                    src = img_element.get_attribute("src")
+                    img_data = requests.get(src).content
+                    with open(f"data/{cr_id}.png", "wb") as f:
+                        f.write(img_data)
+                    print(f"Saved ({i+1}/{max_ads}): {cr_id}")
 
         except Exception as e:
-            print(f"❌ Scraper Error: {e}")
+            print(f"Scraper Error: {e}")
         
         browser.close()
 
 if __name__ == "__main__":
-    scrape_selver_fast()
+    scrape_competitor_ads()
