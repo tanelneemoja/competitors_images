@@ -2,10 +2,10 @@ name: Scrape Competitor Ads
 on:
   push:
     branches:
-      - main  # Triggers whenever you push code to the main branch
+      - main  
   schedule:
-    - cron: '0 0 * * *' # Daily at midnight
-  workflow_dispatch:   # Manual trigger button in GitHub UI
+    - cron: '0 0 * * *' # Runs daily at midnight
+  workflow_dispatch:   # Manual trigger button
 
 permissions:
   contents: write
@@ -27,9 +27,9 @@ jobs:
           pip install playwright requests
           playwright install --with-deps chromium
 
-      - name: Run Scraper
+      - name: Run Unified Scraper
         env:
-          PYTHONUNBUFFERED: "1"  # This forces logs to show up in real-time
+          PYTHONUNBUFFERED: "1"
         run: python scrape_script.py
 
       - name: Commit and Push
@@ -37,12 +37,12 @@ jobs:
           git config --global user.name "Ad-Scraper-Bot"
           git config --global user.email "actions@github.com"
           
-          # Add all changes (new files, modified files, AND deleted files)
-          git add -A data/
+          # Add all new folders (data/Rimi and data/Selver)
+          git add data/
           
           if [ -n "$(git status --porcelain)" ]; then
-            git commit -m "Organized batch sync: $(date +'%Y-%m-%d')"
+            git commit -m "Sync: Rimi & Selver Ads $(date +'%Y-%m-%d')"
             git push
           else
-            echo "No changes in ad library."
+            echo "No new ads found today."
           fi
