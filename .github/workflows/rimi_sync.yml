@@ -1,0 +1,33 @@
+name: Rimi Ad Harvester
+on:
+  workflow_dispatch: # Allows you to run it manually
+  schedule:
+    - cron: '0 0 * * *' # Runs every night at midnight
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install Dependencies
+        run: |
+          pip install playwright requests
+          playwright install chromium
+
+      - name: Run Harvester and Downloader
+        run: python scraper.py
+
+      - name: Commit and Push Results
+        run: |
+          git config --global user.name "GitHub Action"
+          git config --global user.email "action@github.com"
+          git add data/Rimi/*.jpg
+          git commit -m "Add new Rimi ads" || echo "No changes to commit"
+          git push
