@@ -1,0 +1,5 @@
+playwright==1.42.0
+requests==2.31.0
+easyocr==1.7.1
+opencv-python-headless==4.9.0.80
+numpy==1.26.4
