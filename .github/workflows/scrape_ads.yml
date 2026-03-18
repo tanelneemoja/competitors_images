@@ -1,11 +1,10 @@
 name: Scrape Competitor Ads
 on:
   push:
-    branches:
-      - main  
+    branches: [ main ]
   schedule:
-    - cron: '0 0 * * *' # Runs daily at midnight
-  workflow_dispatch:   # Manual trigger button
+    - cron: '0 0 * * *' 
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -22,12 +21,16 @@ jobs:
         with:
           python-version: '3.10'
 
+      - name: Cache OCR Models
+        uses: actions/cache@v3
+        with:
+          path: ~/.EasyOCR
+          key: ${{ runner.os }}-easyocr-models
+
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
-          # Added the vision libraries needed for Rimi
           pip install playwright requests easyocr numpy opencv-python-headless
-          # Install browser AND the system-level dependencies for Linux
           playwright install --with-deps chromium
 
       - name: Run Unified Scraper
@@ -39,10 +42,7 @@ jobs:
         run: |
           git config --global user.name "Ad-Scraper-Bot"
           git config --global user.email "actions@github.com"
-          
-          # This ensures we don't accidentally ignore new subfolders
           git add data/
-          
           if [ -n "$(git status --porcelain)" ]; then
             git commit -m "Sync: Rimi & Selver Ads $(date +'%Y-%m-%d')"
             git push
