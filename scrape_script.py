@@ -4,65 +4,68 @@ import time
 from playwright.sync_api import sync_playwright
 
 # --- CONFIG ---
-RIMI_SEARCH_URL = "https://adstransparency.google.com/?region=EE&domain=rimi.ee&start-date=2026-03-01&end-date=2026-03-18"
+# This is the static ID we are locking onto
+TARGET_AR = "AR17608295264152453121" 
+SEARCH_URL = "https://adstransparency.google.com/?region=EE&domain=rimi.ee&start-date=2026-03-01&end-date=2026-03-18"
 
 def log(msg):
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
 def run_scraper():
-    log("🚀 Starting Element-Direct Audit...")
+    log(f"🚀 Locked on Target AR: {TARGET_AR}")
     os.makedirs("data/Rimi", exist_ok=True)
-    os.makedirs("data/Selver", exist_ok=True)
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(viewport={'width': 1920, 'height': 1080})
         page = context.new_page()
 
-        log("Loading Rimi Results...")
-        page.goto(RIMI_SEARCH_URL, wait_until="networkidle")
+        page.goto(SEARCH_URL, wait_until="networkidle")
         
-        # Expand and Scroll to wake up the renderers
+        # Expand & Scroll
         expand = page.get_by_role("button", name="See all ads")
         if expand.is_visible():
             expand.click()
             time.sleep(5)
         
-        for _ in range(3):
-            page.mouse.wheel(0, 1000)
-            time.sleep(1)
+        page.mouse.wheel(0, 3000)
+        time.sleep(3)
 
-        # 1. Target the exact element type from your snippet
-        # We look for <creative> tags
-        creatives = page.locator("creative").all()
-        log(f"Found {len(creatives)} <creative> elements on the page.")
+        # 1. Grab all grid items
+        # We look for the container that holds the creative and the link
+        items = page.locator("creative-preview").all()
+        log(f"Scanning {len(items)} items for the Static AR...")
 
-        count = 0
-        for i, creative in enumerate(creatives):
-            # Check if this creative card belongs to Rimi
-            # Since <a> tags are missing, we check the card text for "rimi"
-            card_text = creative.inner_text().lower()
+        saved = 0
+        for i, item in enumerate(items):
+            # 2. Check the HTML of the entire preview block for the AR string
+            # This catches it even if it's hidden in a data-attribute or deep link
+            raw_html = item.inner_html()
             
-            if "rimi" in card_text:
-                # 2. Reach inside the <html-renderer> for the <img>
-                img_el = creative.locator("html-renderer img, fletch-renderer img").first
-                
-                if img_el.count() > 0:
-                    img_url = img_el.get_attribute("src")
-                    if img_url:
-                        count += 1
-                        log(f"✅ Rimi Ad {count} found! Source: {img_url[:60]}...")
-                        
-                        # 3. Save it since we finally caught it
-                        try:
-                            res = requests.get(img_url, timeout=10)
-                            if res.status_code == 200:
-                                with open(f"data/Rimi/ad_{count}.jpg", "wb") as f:
-                                    f.write(res.content)
-                        except:
-                            log(f"   ⚠️ Failed to download image for ad {count}")
+            if TARGET_AR in raw_html:
+                # 3. If the AR matches, grab the image inside the <html-renderer>
+                img_el = item.locator("html-renderer img, fletch-renderer img").first
+                img_url = img_el.get_attribute("src") if img_el.count() > 0 else None
 
-        log(f"🏁 Done. Saved {count} Rimi images to data/Rimi/")
+                if img_url:
+                    log(f"✅ Match Found! Item [{i}] matches {TARGET_AR}")
+                    try:
+                        res = requests.get(img_url if img_url.startswith('http') else f"https:{img_url}", timeout=10)
+                        if res.status_code == 200:
+                            path = f"data/Rimi/official_{i}.jpg"
+                            with open(path, "wb") as f:
+                                f.write(res.content)
+                            saved += 1
+                            log(f"   Stored: {path}")
+                    except:
+                        log(f"   ❌ Failed download for {i}")
+            else:
+                # Log a snippet of the 'wrong' ARs so we can see what we are skipping
+                if "AR" in raw_html:
+                    other_ar = raw_html.split("advertiser/")[1].split("/")[0] if "advertiser/" in raw_html else "Unknown"
+                    log(f"   ⏭️ Skipping: Found {other_ar} (Not our target)")
+
+        log(f"🏁 Done. Total Official Rimi Ads Saved: {saved}")
         browser.close()
 
 if __name__ == "__main__":
