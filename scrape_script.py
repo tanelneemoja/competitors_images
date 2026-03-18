@@ -7,7 +7,7 @@ from playwright.sync_api import sync_playwright
 
 def scrape_competitor_ads():
     # URL for the specific competitor
-    search_url = "https://adstransparency.google.com/advertiser/AR08638735883022893057?region=EE&preset-date=Last+30+days"
+    search_url = "https://adstransparency.google.com/advertiser/AR08638735883022893057?region=EE"
     
     # --- 1. CLEAN SLATE ---
     # Wipe the local data folder so old ads from previous runs are GONE
