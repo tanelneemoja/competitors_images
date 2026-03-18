@@ -3,7 +3,7 @@ import requests
 import time
 import re
 from playwright.sync_api import sync_playwright
-
+ 
 # --- SELVER CONFIG ---
 # Direct link to Selver's verified advertiser page
 SEARCH_URL = "https://adstransparency.google.com/advertiser/AR07386001844390559745?region=EE"
