@@ -9,9 +9,12 @@ def log(msg):
     print(f"[{timestamp}] {msg}", flush=True)
 
 def run_scraper():
-    log("!!! STARTING URL-BASED BRUTE-FORCE CRAWLER !!!")
+    log("!!! STARTING TARGETED RIMI CRAWLER !!!")
     for folder in ['data/Selver', 'data/Rimi']:
         os.makedirs(folder, exist_ok=True)
+
+    # Use the specific ID confirmed in your HTML
+    TARGET_ID = "AR17608295264152453121"
 
     date_chunks = [
         ("2026-03-01", "2026-03-11"),
@@ -24,10 +27,10 @@ def run_scraper():
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        context = browser.new_context(viewport={'width': 1920, 'height': 1080})
+        context = browser.new_context(viewport={'width': 1920, 'height': 1200})
         page = context.new_page()
 
-        # --- STAGE 1: SELVER ---
+        # --- STAGE 1: SELVER (Static ID) ---
         log("--- [STAGE 1] SELVER ---")
         sel_ids = set()
         try:
@@ -50,11 +53,10 @@ def run_scraper():
                 time.sleep(2)
         except Exception as e: log(f"Selver Error: {e}")
 
-        # --- STAGE 2: RIMI ---
-        log("--- [STAGE 2] RIMI (URL-Targeting: Media House) ---")
+        # --- STAGE 2: RIMI (Deep Link Inspection) ---
+        log(f"--- [STAGE 2] RIMI (Targeting {TARGET_ID}) ---")
         rimi_saved = 0
         global_seen_ids = set()
-        TARGET_AR_ID = "AR17608295264152453121"
 
         for start, end in date_chunks:
             log(f"  [RANGE] {start} to {end}")
@@ -64,60 +66,60 @@ def run_scraper():
                 page.goto(url, wait_until="networkidle")
                 time.sleep(10)
 
-                # Click Expand
+                # Expansion Button
                 btn = page.locator(".grid-expansion-button")
                 if btn.count() > 0:
-                    log("    [ACTION] Clicking 'See all ads'...")
                     btn.click()
                     time.sleep(5)
 
                 for i in range(20):
+                    # Locate all preview cards (including priority-creative-grid)
                     cards = page.locator("creative-preview").all()
-                    found_new_this_loop = 0
-                    matches_this_loop = 0
+                    found_new = 0
                     
                     for card in cards:
                         try:
-                            anchor = card.locator("a").first
-                            href = anchor.get_attribute("href")
-                            if not href: continue
+                            # 1. Look for any link containing our ID inside this specific card
+                            links = card.locator("a").all()
+                            match_found = False
+                            creative_id = "unknown"
                             
-                            # Extracting IDs for logging
-                            creative_id = href.split("creative/")[-1].split("?")[0]
-                            # Extracting the AR ID from the URL string
-                            found_ar_id = href.split("/advertiser/")[1].split("/")[0]
-
-                            if creative_id not in global_seen_ids:
+                            for link in links:
+                                href = link.get_attribute("href") or ""
+                                if TARGET_ID in href:
+                                    match_found = True
+                                    # Try to extract Creative ID from the URL
+                                    if "/creative/" in href:
+                                        creative_id = href.split("creative/")[-1].split("?")[0]
+                                    break
+                            
+                            if match_found and creative_id not in global_seen_ids:
                                 global_seen_ids.add(creative_id)
-                                found_new_this_loop += 1
+                                found_new += 1
                                 
-                                # LOG EVERY FIND TO CONSOLE
-                                log(f"    [CHECK] ID: {creative_id} | Advertiser: {found_ar_id}")
+                                # Find the actual image
+                                img_tag = card.locator("img").first
+                                img_url = img_tag.get_attribute("src")
+                                
+                                if img_url:
+                                    res = requests.get(img_url, timeout=10)
+                                    with open(f"data/Rimi/{creative_id}.png", "wb") as f:
+                                        f.write(res.content)
+                                    rimi_saved += 1
+                                    log(f"    [MATCH] Saved Rimi Ad: {creative_id}")
 
-                                if TARGET_AR_ID in href:
-                                    img_url = card.locator("img").first.get_attribute("src")
-                                    if img_url:
-                                        res = requests.get(img_url, timeout=10)
-                                        with open(f"data/Rimi/{creative_id}.png", "wb") as f:
-                                            f.write(res.content)
-                                        rimi_saved += 1
-                                        matches_this_loop += 1
-                                        log(f"    >>> MATCH SAVED: {creative_id}")
-                        except Exception as e: continue
+                        except Exception: continue
 
-                    log(f"    Loop {i} Summary: {found_new_this_loop} new ads checked, {matches_this_loop} Rimi matches saved.")
+                    if found_new == 0 and i > 5: break
                     
-                    if found_new_this_loop == 0 and i > 4: 
-                        break
-
                     page.evaluate("window.scrollBy(0, 1000)")
                     time.sleep(3)
 
             except Exception as e:
-                log(f"    [ERROR] Critical failure in range: {e}")
+                log(f"    [ERROR] Range failed: {e}")
 
         browser.close()
-        log(f"!!! FINAL REPORT !!! Selver: {len(sel_ids)} | Rimi (Media House): {rimi_saved}")
+        log(f"!!! DONE !!! Selver: {len(sel_ids)} | Rimi: {rimi_saved}")
 
 if __name__ == "__main__":
     run_scraper()
