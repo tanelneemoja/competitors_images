@@ -100,4 +100,37 @@ def run_scraper():
                                     break
                             
                             # Log every card inspected
-                            if creative_id not in global
+                            if creative_id not in global_seen_ids:
+                                global_seen_ids.add(creative_id)
+                                found_new_in_loop += 1
+                                
+                                if match_found:
+                                    img_tag = card.locator("img").first
+                                    img_url = img_tag.get_attribute("src")
+                                    if img_url:
+                                        res = requests.get(img_url, timeout=10)
+                                        with open(f"data/Rimi/{creative_id}.png", "wb") as f:
+                                            f.write(res.content)
+                                        rimi_saved += 1
+                                        log(f"    [MATCH] Card {card_idx}: {creative_id} (Advertiser: {current_ar}) - SAVED")
+                                else:
+                                    log(f"    [SKIP] Card {card_idx}: {creative_id} (Advertiser: {current_ar}) - NO MATCH")
+
+                        except Exception: continue
+
+                    log(f"    Loop {i}: Processed {found_new_in_loop} new ads.")
+                    
+                    if found_new_in_loop == 0 and i > 4: 
+                        break
+                    
+                    page.evaluate("window.scrollBy(0, 1000)")
+                    time.sleep(3)
+
+            except Exception as e:
+                log(f"    [ERROR] Critical range failure: {e}")
+
+        browser.close()
+        log(f"!!! FINAL TOTALS !!! Selver: {len(sel_ids)} | Rimi (Media House): {rimi_saved}")
+
+if __name__ == "__main__":
+    run_scraper()
