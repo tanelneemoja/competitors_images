@@ -24,7 +24,10 @@ jobs:
 
       - name: Install Dependencies
         run: |
-          pip install playwright requests
+          python -m pip install --upgrade pip
+          # Added the vision libraries needed for Rimi
+          pip install playwright requests easyocr numpy opencv-python-headless
+          # Install browser AND the system-level dependencies for Linux
           playwright install --with-deps chromium
 
       - name: Run Unified Scraper
@@ -37,7 +40,7 @@ jobs:
           git config --global user.name "Ad-Scraper-Bot"
           git config --global user.email "actions@github.com"
           
-          # Add all new folders (data/Rimi and data/Selver)
+          # This ensures we don't accidentally ignore new subfolders
           git add data/
           
           if [ -n "$(git status --porcelain)" ]; then
