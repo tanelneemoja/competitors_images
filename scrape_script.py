@@ -3,61 +3,63 @@ import requests
 import time
 from playwright.sync_api import sync_playwright
 
-TARGET_AR = "AR17608295264152453121" 
-SEARCH_URL = "https://adstransparency.google.com/?region=EE&domain=rimi.ee&start-date=2026-03-01&end-date=2026-03-18"
+# This URL forces Media House (Agency) to only show ads for rimi.ee (Client)
+TARGET_URL = "https://adstransparency.google.com/advertiser/AR17608295264152453121?region=EE&domain=rimi.ee&start-date=2026-03-01&end-date=2026-03-18"
 
 def run_scraper():
-    print(f"🚀 Starting Continuous Collection for Rimi...")
+    print(f"🚀 Starting Filtered Rimi Audit (Media House + rimi.ee)...")
     os.makedirs("data/Rimi", exist_ok=True)
     
-    # We use a set to keep track of unique image URLs so we don't download duplicates
     captured_urls = set()
 
     with sync_playwright() as p:
+        # We use a headed browser or a specific user-agent to ensure Google renders the 'src'
         browser = p.chromium.launch(headless=True)
-        page = browser.new_page()
-        page.goto(SEARCH_URL, wait_until="networkidle")
-        
-        # Expand the grid
+        context = browser.new_context(viewport={'width': 1920, 'height': 1080})
+        page = context.new_page()
+
+        page.goto(TARGET_URL, wait_until="networkidle")
+        time.sleep(5) # Allow the grid to settle
+
+        # 1. Expand the grid
         expand_btn = page.get_by_role("button", name="See all ads")
         if expand_btn.is_visible():
             expand_btn.click()
-            time.sleep(4)
+            time.sleep(3)
 
-        # SCROLLING LOOP: Catch them in the act
-        for scroll_step in range(15):  # Incremental small scrolls
-            print(f"📡 Scanning viewport at step {scroll_step}...")
+        # 2. Step-Scroll and Capture
+        # We don't wait for the end; we grab images as they appear in the viewport
+        for step in range(10):
+            print(f"📡 Scanning batch {step}...")
             
-            # Find all previews currently in the DOM
-            previews = page.locator("creative-preview").all()
+            # Find all potential images in the current view
+            # This covers both static (html-renderer) and video thumbnails (fletch-renderer)
+            images = page.locator("html-renderer img, fletch-renderer img").all()
             
-            for preview in previews:
-                # Check if this specific preview is for Media House
-                if TARGET_AR in (preview.get_attribute("inner_html") or "") or \
-                   preview.locator(f"a[href*='{TARGET_AR}']").count() > 0:
-                    
-                    # Target both renderer types
-                    img_el = preview.locator("html-renderer img, fletch-renderer img").first
-                    img_url = img_el.get_attribute("src") if img_el.count() > 0 else None
-                    
-                    if img_url and img_url not in captured_urls:
-                        captured_urls.add(img_url)
+            for img in images:
+                src = img.get_attribute("src")
+                if src and src not in captured_urls:
+                    # Filter out tiny tracking pixels or icons
+                    if "googlesyndication" in src or "ytimg" in src:
+                        captured_urls.add(src)
                         idx = len(captured_urls)
-                        print(f"   ✨ Caught New Rimi Ad! ({idx})")
                         
-                        # Download immediately before Google clears the cache
                         try:
-                            res = requests.get(img_url if img_url.startswith('http') else f"https:{img_url}")
-                            with open(f"data/Rimi/rimi_official_{idx}.jpg", "wb") as f:
-                                f.write(res.content)
-                        except:
-                            pass
+                            # Handle relative URLs
+                            final_url = src if src.startswith('http') else f"https:{src}"
+                            res = requests.get(final_url, timeout=10)
+                            if res.status_code == 200:
+                                with open(f"data/Rimi/rimi_ad_{idx}.jpg", "wb") as f:
+                                    f.write(res.content)
+                                print(f"   ✅ Saved: rimi_ad_{idx}.jpg")
+                        except Exception as e:
+                            print(f"   ❌ Failed download: {e}")
 
-            # Small scroll to trigger next batch
-            page.mouse.wheel(0, 600)
-            time.sleep(2) # Give renderer time to wake up
+            # Scroll down just enough to trigger the next lazy-load
+            page.mouse.wheel(0, 800)
+            time.sleep(2.5) # Time for Google to swap 'loading' icons for real images
 
-        print(f"🏁 Finished. Collected {len(captured_urls)} unique Official Rimi Ads.")
+        print(f"🏁 Done. Total 'Official' Rimi Ads saved: {len(captured_urls)}")
         browser.close()
 
 if __name__ == "__main__":
