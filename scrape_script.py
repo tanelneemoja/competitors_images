@@ -3,64 +3,96 @@ import requests
 import time
 from playwright.sync_api import sync_playwright
 
-# This URL forces Media House (Agency) to only show ads for rimi.ee (Client)
-TARGET_URL = "https://adstransparency.google.com/advertiser/AR17608295264152453121?region=EE&domain=rimi.ee&start-date=2026-03-01&end-date=2026-03-18"
+# --- CONFIGURATION ---
+# We use the specific AR IDs to filter out agency noise
+TARGETS = {
+    "Rimi": {
+        "domain": "rimi.ee",
+        "ar_id": "AR17608295264152453121" # Media House ID
+    },
+    "Selver": {
+        "domain": "selver.ee",
+        "ar_id": "AR07386001844390559745" # Selver AS Direct ID
+    }
+}
 
-def run_scraper():
-    print(f"🚀 Starting Filtered Rimi Audit (Media House + rimi.ee)...")
-    os.makedirs("data/Rimi", exist_ok=True)
-    
-    captured_urls = set()
+BASE_SAVE_PATH = "data"
 
+def run_unified_sync():
     with sync_playwright() as p:
-        # We use a headed browser or a specific user-agent to ensure Google renders the 'src'
         browser = p.chromium.launch(headless=True)
-        context = browser.new_context(viewport={'width': 1920, 'height': 1080})
-        page = context.new_page()
-
-        page.goto(TARGET_URL, wait_until="networkidle")
-        time.sleep(5) # Allow the grid to settle
-
-        # 1. Expand the grid
-        expand_btn = page.get_by_role("button", name="See all ads")
-        if expand_btn.is_visible():
-            expand_btn.click()
-            time.sleep(3)
-
-        # 2. Step-Scroll and Capture
-        # We don't wait for the end; we grab images as they appear in the viewport
-        for step in range(10):
-            print(f"📡 Scanning batch {step}...")
+        # Setting a standard user agent helps avoid basic bot blocks
+        context = browser.new_context(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36")
+        
+        for name, info in TARGETS.items():
+            print(f"\n--- Processing {name} ---")
+            save_path = os.path.join(BASE_SAVE_PATH, name)
+            os.makedirs(save_path, exist_ok=True)
             
-            # Find all potential images in the current view
-            # This covers both static (html-renderer) and video thumbnails (fletch-renderer)
-            images = page.locator("html-renderer img, fletch-renderer img").all()
+            found_ids = set()
+            page = context.new_page()
+
+            # 1. THE LISTENER: Intercept IDs from the hidden API responses
+            def handle_response(response):
+                if "SearchAds" in response.url and response.status == 200:
+                    try:
+                        data = response.json()
+                        for ad in data.get('ads', []):
+                            if ad.get('advertiserId') == info['ar_id']:
+                                found_ids.add(ad.get('creativeId'))
+                    except: pass
+
+            page.on("response", handle_response)
+
+            # 2. TRIGGER: Load the search and force data packets to send
+            print(f"📡 Harvesting IDs for {info['domain']}...")
+            page.goto(f"https://adstransparency.google.com/?region=EE&domain={info['domain']}", wait_until="networkidle")
             
-            for img in images:
-                src = img.get_attribute("src")
-                if src and src not in captured_urls:
-                    # Filter out tiny tracking pixels or icons
-                    if "googlesyndication" in src or "ytimg" in src:
-                        captured_urls.add(src)
-                        idx = len(captured_urls)
-                        
-                        try:
-                            # Handle relative URLs
-                            final_url = src if src.startswith('http') else f"https:{src}"
-                            res = requests.get(final_url, timeout=10)
-                            if res.status_code == 200:
-                                with open(f"data/Rimi/rimi_ad_{idx}.jpg", "wb") as f:
-                                    f.write(res.content)
-                                print(f"   ✅ Saved: rimi_ad_{idx}.jpg")
-                        except Exception as e:
-                            print(f"   ❌ Failed download: {e}")
+            try:
+                # Trigger expansion
+                expand = page.get_by_role("button", name="See all ads")
+                if expand.is_visible(timeout=5000):
+                    expand.click()
+                    # Scroll to ensure Google's API sends the next batches of IDs
+                    for _ in range(10): 
+                        page.mouse.wheel(0, 4000)
+                        time.sleep(1.5)
+            except: pass
 
-            # Scroll down just enough to trigger the next lazy-load
-            page.mouse.wheel(0, 800)
-            time.sleep(2.5) # Time for Google to swap 'loading' icons for real images
+            print(f"✅ Found {len(found_ids)} unique IDs for {name}.")
 
-        print(f"🏁 Done. Total 'Official' Rimi Ads saved: {len(captured_urls)}")
+            # 3. DOWNLOADER: Visit direct pages to get the clean images
+            for i, cid in enumerate(list(found_ids)):
+                local_file = os.path.join(save_path, f"{cid}.jpg")
+                
+                # Skip if we already have it
+                if os.path.exists(local_file):
+                    continue
+
+                try:
+                    # Direct Detail Page is the most stable way to get the source URL
+                    detail_url = f"https://adstransparency.google.com/advertiser/{info['ar_id']}/creative/{cid}?region=EE"
+                    page.goto(detail_url, wait_until="domcontentloaded")
+                    
+                    # Look for the image in either the static or video renderer
+                    img_el = page.locator("html-renderer img, fletch-renderer img").first
+                    img_url = img_el.get_attribute("src")
+
+                    if img_url:
+                        final_url = img_url if img_url.startswith('http') else f"https:{img_url}"
+                        res = requests.get(final_url, timeout=15)
+                        if res.status_code == 200:
+                            with open(local_file, "wb") as f:
+                                f.write(res.content)
+                            print(f"   [{i+1}/{len(found_ids)}] Saved: {cid}")
+                    
+                    time.sleep(0.5) # Gentle pause
+                except Exception as e:
+                    print(f"   ❌ Error on {cid}: {e}")
+
+            page.close()
+
         browser.close()
 
 if __name__ == "__main__":
-    run_scraper()
+    run_unified_sync()
