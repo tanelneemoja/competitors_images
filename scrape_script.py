@@ -5,8 +5,12 @@ import re
 import shutil
 from playwright.sync_api import sync_playwright
 
-def scrape_test_batch(targets, limit=10):
-    # --- 1. GLOBAL RESET ---
+def scrape_competitor_ads():
+    # URL for the specific competitor
+    search_url = "https://adstransparency.google.com/advertiser/AR08638735883022893057?region=EE&preset-date=Last+30+days"
+    
+    # --- 1. CLEAN SLATE ---
+    # Wipe the local data folder so old ads from previous runs are GONE
     if os.path.exists('data'):
         shutil.rmtree('data')
     os.makedirs('data', exist_ok=True)
@@ -19,55 +23,50 @@ def scrape_test_batch(targets, limit=10):
         )
         page = context.new_page()
 
-        for brand_name, advertiser_id in targets.items():
-            brand_folder = f"data/{brand_name}"
-            os.makedirs(brand_folder, exist_ok=True)
+        try:
+            print(f"Loading Advertiser Page...")
+            page.goto(search_url, wait_until="domcontentloaded", timeout=60000)
+            page.wait_for_selector(".ads-count", timeout=30000)
             
-            search_url = f"https://adstransparency.google.com/advertiser/{advertiser_id}?region=EE&preset-date=Last+30+days"
-            print(f"\n--- Testing {brand_name} (Limit: {limit} ads) ---")
-            
-            try:
-                page.goto(search_url, wait_until="domcontentloaded", timeout=60000)
-                page.wait_for_selector(".ads-count", timeout=30000)
-                
-                # Small scroll to get the first batch
+            # --- 2. GET TARGET COUNT ---
+            count_text = page.locator(".ads-count").inner_text()
+            max_ads = int(re.search(r"(\d+)", count_text).group(1))
+            print(f"Targeting {max_ads} ads. Starting scroll...")
+
+            # --- 3. INFINITE SCROLL ---
+            # This handles the '60 vs 120' ads problem
+            last_count = 0
+            for _ in range(15): # Try scrolling up to 15 times
                 page.keyboard.press("End")
-                time.sleep(5)
+                time.sleep(4) # Wait for Google to load more
+                current_count = page.locator("creative-preview").count()
+                print(f"Discovered {current_count}/{max_ads} ads...")
+                if current_count >= max_ads or current_count == last_count:
+                    break
+                last_count = current_count
 
-                ads = page.locator("creative-preview").all()
-                processed = 0
+            # --- 4. SCRAPE ALL ---
+            ads = page.locator("creative-preview").all()
+            for i, ad in enumerate(ads):
+                if i >= max_ads: break # Stop at the official UI count
+                
+                link_element = ad.locator("a[href*='/creative/CR']").first
+                if link_element.count() == 0: continue
+                
+                cr_id = re.search(r"(CR\d+)", link_element.get_attribute("href")).group(1)
+                img_element = ad.locator("html-renderer img").first
+                
+                if img_element.count() > 0:
+                    src = img_element.get_attribute("src")
+                    img_data = requests.get(src).content
+                    with open(f"data/{cr_id}.png", "wb") as f:
+                        f.write(img_data)
+                    print(f"Saved ({i+1}/{max_ads}): {cr_id}")
 
-                for ad in ads:
-                    # Check if we hit our test limit
-                    if processed >= limit:
-                        print(f"Reached test limit of {limit} for {brand_name}. Stopping.")
-                        break
-
-                    ad_content = ad.inner_text().lower()
-                    
-                    # Keyword Filter
-                    if brand_name.lower() in ad_content:
-                        link_element = ad.locator("a[href*='/creative/CR']").first
-                        if link_element.count() == 0: continue
-                        
-                        cr_id = re.search(r"(CR\d+)", link_element.get_attribute("href")).group(1)
-                        img_element = ad.locator("html-renderer img").first
-                        
-                        if img_element.count() > 0:
-                            src = img_element.get_attribute("src")
-                            img_data = requests.get(src).content
-                            with open(f"{brand_folder}/{cr_id}.png", "wb") as f:
-                                f.write(img_data)
-                            processed += 1
-                            print(f"  [SAVED {processed}/{limit}] {brand_name}: {cr_id}.png")
-
-            except Exception as e:
-                print(f"  [ERROR] {brand_name} failed: {e}")
-
+        except Exception as e:
+            print(f"Scraper Error: {e}")
+        
         browser.close()
 
 if __name__ == "__main__":
-    competitors = {
-        "Selver": "AR08638735883022893057",
-        "Rimi": "AR17608295264152453121" 
-    }
+    scrape_competitor_ads()
