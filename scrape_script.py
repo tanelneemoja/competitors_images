@@ -2,7 +2,7 @@ import os
 import requests
 import time
 from playwright.sync_api import sync_playwright
-
+ 
 # --- CONFIG ---
 SELVER_URL = "https://adstransparency.google.com/advertiser/AR08638735883022893057?region=EE"
 RIMI_SEARCH_URL = "https://adstransparency.google.com/?region=EE&domain=rimi.ee&start-date=2026-03-01&end-date=2026-03-18"
