@@ -21,7 +21,7 @@ jobs:
 
       - name: Install Dependencies
         run: |
-          pip install -r requirements.txt
+          pip install playwright==1.44.0 pandas httpx
           playwright install --with-deps chromium
 
       - name: Run Script
