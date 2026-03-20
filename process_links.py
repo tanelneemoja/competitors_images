@@ -44,7 +44,7 @@ def process_ads():
         return
 
     df = pd.read_csv(CSV_FILE)
-    log(f"📋 Loaded {len(df)} links from CSV. Starting engine...")
+    log(f"📋 Loaded {len(df)} links. Starting engine...")
     
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -66,34 +66,46 @@ def process_ads():
                 log(f"⏩ [{index+1}/{len(df)}] Skipping {ad_id} (Exists)")
                 continue
 
-            log(f"🚀 [{index+1}/{len(df)}] {advertiser} | Platform: {platform}")
+            log(f"🚀 [{index+1}/{len(df)}] {advertiser} | {platform}")
             
             try:
-                log(f"   🌐 Navigating to URL...")
+                # Go to URL
                 page.goto(url, wait_until="domcontentloaded", timeout=60000)
+
+                # --- NEW: META BROKEN LINK CHECK ---
+                if "Meta" in platform:
+                    # Check for "Content not available" message
+                    unavailable_msg = page.get_by_text("This content isn't available right now")
+                    if unavailable_msg.is_visible():
+                        log(f"   ⏩ Link Broken/Expired. Skipping immediately.")
+                        continue
+
                 img_src = None
 
                 if "Meta" in platform:
-                    log(f"   ⏳ Waiting for Meta Image...")
-                    page.wait_for_selector('img[src*="fbcdn.net"]', timeout=20000)
+                    log(f"   ⏳ Locating Meta Image...")
+                    # Small wait for the actual ad content to render
+                    page.wait_for_selector('img[src*="fbcdn.net"]', timeout=15000)
                     img_src = page.locator('img[src*="fbcdn.net"]').first.get_attribute("src")
                 
                 else:
-                    log(f"   ⏳ Waiting for Google Image...")
+                    log(f"   ⏳ Locating Google Image...")
                     page.wait_for_selector('html-renderer img', timeout=20000)
                     img_src = page.locator('html-renderer img').first.get_attribute("src")
 
                 if img_src:
-                    log(f"   💾 Downloading image...")
                     if download_image(img_src, advertiser_dir, ad_id):
                         log(f"   ✅ Saved: {ad_id}.png")
                 else:
-                    log(f"   ❌ No image found on page.")
+                    log(f"   ❌ No image found.")
 
             except Exception as e:
-                log(f"   ❌ Failed: {str(e)[:100]}...")
+                # Check if it was just a timeout on an already identified broken page
+                if "timeout" in str(e).lower() and "Meta" in platform:
+                     log(f"   ❌ Timeout (Page likely restricted or broken).")
+                else:
+                     log(f"   ❌ Failed: {str(e)[:50]}...")
             
-            # Small delay for safety
             time.sleep(1)
 
         browser.close()
