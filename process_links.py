@@ -6,13 +6,13 @@ import shutil
 import httpx
 from playwright.async_api import async_playwright
 
-# --- CONFIG ---
+# --- KONFIGURATSIOON ---
 CSV_FILE = "meta_google_ads_links(in).csv"
 BASE_DATA_DIR = "data"
 CONCURRENCY_LIMIT = 5 
-GTC_TIMEOUT = 30000 # 30 seconds to find the ad element
+GTC_TIMEOUT = 30000 
 
-stats = {"success": 0, "broken": 0, "timeout": 0, "no_img": 0, "exists": 0}
+stats = {"success": 0, "broken": 0, "timeout": 0, "no_img": 0, "exists": 0, "failed_download": 0}
 
 def log(msg):
     print(msg, flush=True)
@@ -37,8 +37,10 @@ async def download_image(client, url, folder, filename):
             with open(path, "wb") as f:
                 f.write(resp.content)
             return True
-    except:
-        return False
+        else:
+            log(f"      ⚠️ Pildi allalaadimine ebaõnnestus (HTTP {resp.status_code})")
+    except Exception as e:
+        log(f"      ⚠️ Allalaadimise viga: {str(e)[:50]}")
     return False
 
 async def process_link(context, row, index, total, semaphore, client):
@@ -60,64 +62,64 @@ async def process_link(context, row, index, total, semaphore, client):
         page = await context.new_page()
         try:
             log(f"🚀 [{index}/{total}] [{platform_label}] {advertiser}...")
-            
-            # Using 'load' instead of 'networkidle' to prevent infinite hangs
             await page.goto(url, wait_until="load", timeout=45000)
 
             if platform_label == "META":
                 try:
-                    await page.wait_for_selector('img[src*="fbcdn.net"], :text("This content isn\'t available right now")', timeout=15000)
+                    # Ootame pilti või "pole saadaval" teadet
+                    await page.wait_for_selector('img[src*="fbcdn.net"], :text("This content isn\'t available right now")', timeout=20000)
+                    
                     if await page.get_by_text("This content isn't available right now").is_visible():
-                        log(f"   ⏩ [{index}] SKIPPED: Meta expired.")
+                        log(f"   ⏩ [{index}] SKIPPED: Reklaam pole enam aktiivne (Broken).")
                         stats["broken"] += 1
                     else:
-                        img_src = await page.locator('img[src*="fbcdn.net"]').first.get_attribute("src")
-                        if img_src and await download_image(client, img_src, advertiser_dir, ad_id):
-                            log(f"   ✅ [{index}] SUCCESS: Image saved.")
-                            stats["success"] += 1
-                except:
+                        img_elem = page.locator('img[src*="fbcdn.net"]').first
+                        img_src = await img_elem.get_attribute("src")
+                        if img_src:
+                            if await download_image(client, img_src, advertiser_dir, ad_id):
+                                log(f"   ✅ [{index}] SUCCESS: Pilt salvestatud.")
+                                stats["success"] += 1
+                            else:
+                                stats["failed_download"] += 1
+                        else:
+                            log(f"   ❌ [{index}] ERROR: Pildi URL-i ei leitud.")
+                            stats["no_img"] += 1
+                except Exception:
+                    log(f"   ⏳ [{index}] TIMEOUT: Meta pilti ei ilmub lehele.")
                     stats["timeout"] += 1
             
             else: # GOOGLE (GTC)
                 try:
-                    # 1. Check for immediate "Not Found" / Policy violations
                     error_selectors = [".empty-results", ".policy-violation-banner", ":text('Can\'t find ad')"]
                     for err in error_selectors:
                         if await page.locator(err).is_visible():
-                            log(f"   ⏩ [{index}] SKIPPED: Regional/Policy block.")
+                            log(f"   ⏩ [{index}] SKIPPED: Piirkondlik või poliitika piirang.")
                             stats["broken"] += 1
                             return
 
-                    # 2. Wait for the Creative container to exist
-                    # We wait for the specific 'creative' or 'renderer' tags
                     await page.wait_for_selector('html-renderer, fletch-renderer, creative, .creative-container', timeout=GTC_TIMEOUT)
-                    
-                    # 3. Small sleep to allow inner frames/images to actually render
                     await asyncio.sleep(2.5)
 
-                    # 4. Try getting a high-res image first
                     img_loc = page.locator('html-renderer img, .creative-container img').first
                     if await img_loc.count() > 0 and await img_loc.is_visible():
                         img_src = await img_loc.get_attribute("src")
                         if img_src and "http" in img_src:
                             if await download_image(client, img_src, advertiser_dir, ad_id):
-                                log(f"   ✅ [{index}] SUCCESS: Direct image saved.")
+                                log(f"   ✅ [{index}] SUCCESS: GTC otsepilt salvestatud.")
                                 stats["success"] += 1
                                 return
 
-                    # 5. Screenshot Fallback (for Text, Video, HTML5)
-                    # We target the 'creative' element directly for a clean crop
                     container = page.locator('creative, html-renderer, fletch-renderer, .creative-container').first
                     if await container.is_visible():
                         await container.screenshot(path=target_path)
-                        log(f"   📸 [{index}] SUCCESS: Screenshot saved.")
+                        log(f"   📸 [{index}] SUCCESS: GTC ekraanitõmmis tehtud.")
                         stats["success"] += 1
                     else:
-                        log(f"   ❌ [{index}] ERROR: Elements found but not visible.")
+                        log(f"   ❌ [{index}] ERROR: Element leiti, aga polnud nähtav.")
                         stats["no_img"] += 1
 
                 except Exception as e:
-                    log(f"   ⏳ [{index}] TIMEOUT: Ad content did not render in time.")
+                    log(f"   ⏳ [{index}] TIMEOUT: GTC sisu ei laadinud.")
                     stats["timeout"] += 1
 
         except Exception as e:
@@ -136,7 +138,6 @@ async def main():
     
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
-        # Use a real-looking User Agent to reduce Google throttling
         context = await browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
             viewport={'width': 1280, 'height': 1200}
@@ -147,6 +148,8 @@ async def main():
             tasks = [process_link(context, row, i, len(df), semaphore, client) for i, (_, row) in enumerate(df.iterrows(), 1)]
             await asyncio.gather(*tasks)
         await browser.close()
+    
+    log(f"\n🏁 KOKKUVÕTE: Edukaid: {stats['success']} | Katkiseid: {stats['broken']} | Aegumisi: {stats['timeout']} | Allalaadimise vigu: {stats['failed_download']}")
 
 if __name__ == "__main__":
     asyncio.run(main())
