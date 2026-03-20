@@ -1,8 +1,8 @@
-name: Process Ad Links
+name: Process Ad Links High Speed
 on:
   push:
     branches: [ main ]
-  workflow_dispatch: # Manual trigger
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -18,23 +18,28 @@ jobs:
         uses: actions/setup-python@v4
         with:
           python-version: '3.10'
+          cache: 'pip'
 
       - name: Install Dependencies
         run: |
-          pip install playwright==1.44.0 pandas httpx
+          pip install playwright pandas httpx
           playwright install --with-deps chromium
 
-      - name: Run Script
+      - name: Run Scraper
+        env:
+          PYTHONUNBUFFERED: "1"
+          # CHANGE TO "false" AFTER YOUR FIRST RUN
+          PURGE_DATA: "true" 
         run: python process_links.py
 
-      - name: Commit and Push Data
+      - name: Commit and Push
         run: |
           git config --global user.name "Ad-Processor-Bot"
           git config --global user.email "actions@github.com"
           git add data/
-          if [ -n "$(git status --porcelain)" ]; then
-            git commit -m "Sync: New Ad Images $(date +'%Y-%m-%d')"
+          if [ -n "$(git status --porcelain data/)" ]; then
+            git commit -m "Sync: New Ad Images/Screenshots $(date +'%Y-%m-%d')"
             git push
           else
-            echo "No new images processed."
+            echo "No new images."
           fi
