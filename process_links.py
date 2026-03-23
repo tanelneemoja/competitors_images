@@ -97,7 +97,9 @@ async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
         file_path = os.path.join(advertiser_dir, f"{ad_id}.png")
         await asyncio.sleep(7.0)
 
-        await target.screenshot(path=file_path)
+        await target.wait_for(state="visible", timeout=15000)
+await asyncio.sleep(2.5)
+await target.screenshot(path=file_path)
 
         if os.path.exists(file_path):
             with open(file_path, "rb") as f:
