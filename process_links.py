@@ -9,11 +9,8 @@ import hashlib
 # --- CONFIGURATION ---
 CSV_FILE = "meta_google_ads_links(in).csv"
 BASE_DATA_DIR = "data"
-
-# Dual-Speed Concurrency
 GTC_CONCURRENCY = 5
 META_CONCURRENCY = 15
-
 GTC_TIMEOUT = 60000    
 META_TIMEOUT = 30000   
 BAD_HASH = "f1813cb9" 
@@ -34,17 +31,10 @@ def extract_id_from_url(url):
     return match.group(1) if match else "unknown"
 
 async def is_actually_dead(page):
-    """Double-check death signals to avoid false positives on slow-loading GTC ads."""
-    death_signals = [
-        "This content isn't available right now", 
-        "it's been deleted",                      
-        "An ad with this ID was not found",
-        "Removed for a policy violation"
-    ]
+    death_signals = ["This content isn't available right now", "it's been deleted", "An ad with this ID was not found", "Removed for a policy violation"]
     content = await page.content()
     if any(signal in content for signal in death_signals):
-        # If signal found, wait 3s and check again to be sure it wasn't just a loading state
-        await asyncio.sleep(3)
+        await asyncio.sleep(3) # Anti-False Positive Sleep
         content_retry = await page.content()
         return any(signal in content_retry for signal in death_signals)
     return False
@@ -65,24 +55,25 @@ async def process_link(context, row, seq_num, gtc_sem, meta_sem):
         for attempt in range(max_attempts):
             page = await context.new_page()
             try:
-                log(f"🔍 [Seq: {seq_num}] Target ID: {ad_id} {'(Retry)' if attempt > 0 else ''}")
+                log(f"🔍 [Seq: {seq_num}] Start: {ad_id} {'(Retry)' if attempt > 0 else ''}")
+                
+                # Use domcontentloaded to avoid tracker hangs
                 await page.goto(url, wait_until="domcontentloaded", timeout=timeout)
                 
-                # GTC specific: Wait for any of our known valid containers to exist
                 if is_google:
+                    # Heartbeat for slow GTC ads
                     try:
                         await page.wait_for_selector("fletch-renderer, html-renderer, .creative-container", timeout=15000)
                     except:
-                        pass 
+                        log(f"   ⏳ [Seq: {seq_num}] Still waiting for Google renderer...")
 
-                # The "False Positive" Fix: Verify death signals only after a small grace period
                 if await is_actually_dead(page):
-                    log(f"   ⏩ [Seq: {seq_num}] SKIPPED: Confirmed unavailable.")
+                    log(f"   ⏩ [Seq: {seq_num}] SKIPPED: Ad unavailable. URL: {url}")
                     stats["broken"] += 1
                     await page.close()
                     return
 
-                await page.wait_for_timeout(4000) # Final settle time
+                await page.wait_for_timeout(5000) 
 
                 target = None
                 if is_google:
@@ -92,7 +83,6 @@ async def process_link(context, row, seq_num, gtc_sem, meta_sem):
                             target = loc
                             break
                 else:
-                    # Meta Targeting
                     meta_card = page.locator(f"div:has-text('Library ID: {ad_id}')").locator("xpath=ancestor::div[contains(@class, '_8n-a')]").first
                     if await meta_card.count() > 0:
                         target = meta_card
@@ -107,7 +97,7 @@ async def process_link(context, row, seq_num, gtc_sem, meta_sem):
 
                     if img_hash == BAD_HASH:
                         os.remove(file_path)
-                        log(f"   ⏩ [Seq: {seq_num}] SKIPPED: Ad dead (Hash {img_hash}).")
+                        log(f"   ⏩ [Seq: {seq_num}] SKIPPED: Dead Hash ({img_hash}). URL: {url}")
                         stats["broken"] += 1
                         await page.close()
                         return
@@ -122,7 +112,7 @@ async def process_link(context, row, seq_num, gtc_sem, meta_sem):
                     return 
                 
                 else:
-                    raise Exception("No ad container found after loading.")
+                    raise Exception("No ad container found.")
 
             except Exception as e:
                 err_msg = str(e).split('\n')[0][:60]
@@ -140,9 +130,7 @@ async def process_link(context, row, seq_num, gtc_sem, meta_sem):
             await page.close()
 
 async def main():
-    if not os.path.exists(CSV_FILE): 
-        print(f"Error: {CSV_FILE} not found.")
-        return
+    if not os.path.exists(CSV_FILE): return
     df = pd.read_csv(CSV_FILE)
     start_time = datetime.now()
     
@@ -161,10 +149,8 @@ async def main():
         await browser.close()
 
     duration = datetime.now() - start_time
-    print("\n" + "="*40)
-    print(f"FINISHED IN: {str(duration).split('.')[0]}")
+    print(f"\nFINISHED IN: {str(duration).split('.')[0]}")
     print(f"✅ NEW: {stats['new']} | 🔄 REPLACED: {stats['replaced']} | ⏩ SKIPPED: {stats['broken']} | ❌ FAIL: {stats['failed']}")
-    print("="*40)
 
 if __name__ == "__main__":
     asyncio.run(main())
