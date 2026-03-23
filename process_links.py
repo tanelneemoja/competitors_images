@@ -2,17 +2,18 @@ import os
 import asyncio
 import pandas as pd
 import re
-import httpx
 from playwright.async_api import async_playwright
 from datetime import datetime
 
 # --- CONFIGURATION ---
 CSV_FILE = "meta_google_ads_links(in).csv"
 BASE_DATA_DIR = "data"
-CONCURRENCY_LIMIT = 8  # Balanced for speed and iframe stability
-GTC_TIMEOUT = 25000    
+CONCURRENCY_LIMIT = 15 
+GTC_TIMEOUT = 30000    
 
-stats = {"success": 0, "broken": 0, "timeout": 0, "overwritten": 0, "screenshot": 0}
+# Global counters
+stats = {"new": 0, "replaced": 0, "broken": 0, "failed": 0}
+failed_ads = []
 
 def log(msg):
     timestamp = datetime.now().strftime("%H:%M:%S")
@@ -22,92 +23,94 @@ def sanitize_filename(name):
     return re.sub(r'[<>:"/\\|?*]', '', str(name)).strip()
 
 def extract_id_from_url(url):
-    # Extract ID for both Meta and GTC
     match = re.search(r"(?:creative/|id=)([A-Z0-9\d]+)", str(url))
-    return match.group(1) if match else f"ad_{int(datetime.now().timestamp())}"
+    return match.group(1) if match else "unknown"
 
-async def download_image(client, url, folder, filename):
-    try:
-        # Ignore small icons/logos by checking URL patterns or sizes
-        if "icon" in url.lower() or ".svg" in url.lower():
-            return False
-            
-        resp = await client.get(url, timeout=10)
-        if resp.status_code == 200 and len(resp.content) > 5000: # Skip files < 5KB (usually logos)
-            path = os.path.join(folder, f"{filename}.png")
-            with open(path, "wb") as f:
-                f.write(resp.content)
-            return True
-    except Exception:
-        pass
-    return False
-
-async def process_link(context, row, index, total, semaphore, client):
+async def process_link(context, row, index, total, semaphore):
     async with semaphore:
         advertiser = sanitize_filename(row.get('advertiser_name', 'Unknown'))
-        url = row.get('creative_page_url', '')
+        url = str(row.get('creative_page_url', ''))
         ad_id = extract_id_from_url(url)
         
         advertiser_dir = os.path.join(BASE_DATA_DIR, advertiser)
         os.makedirs(advertiser_dir, exist_ok=True)
-        target_path = os.path.join(advertiser_dir, f"{ad_id}.png")
 
         page = await context.new_page()
-        
-        # SPEED: Abort SVG/GIF to avoid capturing logos as the main image
-        await page.route("**/*.{svg,gif}", lambda route: route.abort())
-
         try:
-            log(f"🚀 [{index}/{total}] [{advertiser}]")
+            log(f"🚀 [{index}/{total}] Checking {advertiser} | ID: {ad_id}")
             await page.goto(url, wait_until="domcontentloaded", timeout=GTC_TIMEOUT)
 
-            # --- 1. THE "CAN'T FIND" FAST EXIT ---
-            # Checks for the specific GTC error state you provided
-            error_check = page.locator(".empty-results, :text('Can\\'t find ad'), :text('isn\\'t available')")
-            if await error_check.count() > 0 and await error_check.first.is_visible():
-                log(f"   ⏩ SKIPPED: Ad not found/available.")
+            # 1. Check for Expired/Unavailable
+            if await page.locator(":text('isn\\'t available'), :text('Can\\'t find ad'), .empty-results").first.is_visible():
+                log(f"   ⏩ SKIP: Ad link is dead/expired.")
                 stats["broken"] += 1
                 return
 
-            # --- 2. THE IFRAME/SADBUNDLE CHECK ---
-            # We want the ACTUAL image inside the ad, not a screenshot of the wrapper
-            try:
-                await page.wait_for_selector('html-renderer, fletch-renderer', timeout=10000)
+            # 2. Find Ad Container
+            container_selectors = [
+                '[data-testid="ad-library-dynamic-content-container"]', 
+                '[data-testid*="carousel"]',                           
+                '.creative-container',                                 
+                'fletch-renderer'                                      
+            ]
+            
+            container = None
+            for sel in container_selectors:
+                loc = page.locator(sel).first
+                if await loc.is_visible():
+                    container = loc
+                    break
+
+            if not container:
+                reason = "Container not found (Possible new UI layout)"
+                log(f"   ⚠️ FAIL: {reason}")
+                failed_ads.append({"id": ad_id, "adv": advertiser, "url": url, "reason": reason})
+                stats["failed"] += 1
+                return
+
+            # 3. Handle Carousel vs Static Naming
+            next_btn = page.locator('div[role="button"][aria-label*="Next"], button[aria-label*="Next"], .next-button').first
+            is_carousel = await next_btn.is_visible()
+
+            if is_carousel:
+                slide_idx = 1
+                while True:
+                    file_name = f"{ad_id}_{slide_idx}.png"
+                    file_path = os.path.join(advertiser_dir, file_name)
+                    
+                    action = "REPLACED" if os.path.exists(file_path) else "ADDED"
+                    if action == "REPLACED": stats["replaced"] += 1
+                    else: stats["new"] += 1
+
+                    await container.screenshot(path=file_path)
+                    log(f"   📸 {action}: {file_name} (Carousel)")
+
+                    if await next_btn.is_visible():
+                        is_disabled = await next_btn.get_attribute("aria-disabled") == "true"
+                        if is_disabled: break
+                        await next_btn.click()
+                        await asyncio.sleep(1.2)
+                        slide_idx += 1
+                        if slide_idx > 15: break
+                    else:
+                        break
+            else:
+                # Static / Google Ad
+                file_name = f"{ad_id}.png"
+                file_path = os.path.join(advertiser_dir, file_name)
                 
-                iframe_loc = page.locator("iframe[src*='sadbundle'], iframe[src*='adframe']").first
-                if await iframe_loc.count() > 0:
-                    frame = await iframe_loc.content_frame()
-                    if frame:
-                        # Find the largest image in the frame
-                        inner_img = frame.locator("img").first
-                        inner_src = await inner_img.get_attribute("src")
-                        if inner_src and await download_image(client, inner_src, advertiser_dir, ad_id):
-                            log(f"   ✅ SUCCESS: Extracted high-res from Iframe.")
-                            stats["success"] += 1
-                            return
+                action = "REPLACED" if os.path.exists(file_path) else "ADDED"
+                if action == "REPLACED": stats["replaced"] += 1
+                else: stats["new"] += 1
 
-                # --- 3. STANDARD RENDERER ---
-                img_loc = page.locator('html-renderer img, .creative-container img').first
-                if await img_loc.count() > 0:
-                    img_src = await img_loc.get_attribute("src")
-                    if img_src and await download_image(client, img_src, advertiser_dir, ad_id):
-                        log(f"   ✅ SUCCESS: Direct Image Overwritten.")
-                        stats["success"] += 1
-                        return
-
-                # --- 4. SCREENSHOT FALLBACK (Video/Complex) ---
-                container = page.locator('.creative-container, fletch-renderer').first
-                await container.screenshot(path=target_path)
-                log(f"   📸 SUCCESS: Captured Screenshot.")
-                stats["screenshot"] += 1
-                stats["success"] += 1
-
-            except Exception:
-                log(f"   ⏳ TIMEOUT: Content failed to render.")
-                stats["timeout"] += 1
+                await container.screenshot(path=file_path)
+                log(f"   📸 {action}: {file_name}")
 
         except Exception as e:
-            log(f"   ❌ ERROR: {str(e)[:50]}")
+            err = str(e).split('\n')[0][:70]
+            log(f"   ❌ ERROR on {ad_id}: {err}")
+            failed_ads.append({"id": ad_id, "adv": advertiser, "url": url, "reason": err})
+            stats["failed"] += 1
         finally:
             await page.close()
 
@@ -117,18 +120,25 @@ async def main():
     
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/122.0.0.0",
-            viewport={'width': 1200, 'height': 900}
-        )
-        
+        context = await browser.new_context(viewport={'width': 1280, 'height': 1200})
         semaphore = asyncio.Semaphore(CONCURRENCY_LIMIT)
-        async with httpx.AsyncClient(follow_redirects=True) as client:
-            tasks = [process_link(context, row, i, len(df), semaphore, client) for i, (_, row) in enumerate(df.iterrows(), 1)]
-            await asyncio.gather(*tasks)
-            
+        await asyncio.gather(*[process_link(context, row, i, len(df), semaphore) for i, (_, row) in enumerate(df.iterrows(), 1)])
         await browser.close()
-    log(f"FINISH: Success: {stats['success']} | Broken/Skipped: {stats['broken']}")
+
+    # --- FINAL DETAILED REPORT ---
+    print("\n" + "="*30)
+    print("      SCRAPE STATISTICS")
+    print("="*30)
+    print(f"✅ NEW IMAGES ADDED:    {stats['new']}")
+    print(f"🔄 IMAGES REPLACED:     {stats['replaced']}")
+    print(f"⏩ EXPIRED ADS SKIPPED: {stats['broken']}")
+    print(f"❌ TECHNICAL FAILURES:  {stats['failed']}")
+    print("="*30)
+
+    if failed_ads:
+        print("\n" + "!"*10 + " FAILURE AUDIT LOG " + "!"*10)
+        for f in failed_ads:
+            print(f"ADVERTISER: {f['adv']}\nID:         {f['id']}\nWHY:        {f['reason']}\nURL:        {f['url']}\n" + "-"*30)
 
 if __name__ == "__main__":
     asyncio.run(main())
