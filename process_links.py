@@ -41,23 +41,23 @@ async def is_actually_dead(page, url, seq_num):
 
 async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
     """
-    ONLY MODIFIED: Targeted locators for Swedbank/Rademar/Eesti Energia.
-    Everything else (Hash check, logic flow) is kept exactly as provided.
+    Handles Images, HTML5, Video (Fletch), and Carousels (Join Up/Coop).
     """
     indicator = page.locator(".variation-index-indicator").first
     has_variations = await indicator.is_visible()
     
-    # CHANGED: Replaced the old target line with a robust check for HTML5/Nested Imgs
-    target = None
+    # Priority locators to catch all formats
     locators = [
-        "html-renderer img",           # Eesti Energia (Img inside renderer)
-        "html-renderer",               # Swedbank / Rademar (HTML5)
-        "iframe[src*='sadbundle']",    # Direct banking iFrames
-        ".creative-sub-container:not(.hidden)", 
+        "html-renderer img",           
+        "html-renderer",               
+        "iframe[src*='sadbundle']",    
         "fletch-renderer", 
+        "iframe[src*='googlesyndication.com']",
+        ".creative-sub-container:not(.hidden)", 
         ".creative-container"
     ]
     
+    target = None
     for _ in range(5):
         for selector in locators:
             loc = page.locator(selector).first
@@ -73,8 +73,7 @@ async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
 
     if not has_variations:
         file_path = os.path.join(advertiser_dir, f"{ad_id}.png")
-        # CHANGED: Increased sleep to 6.0 for HTML5 iFrame painting stability
-        await asyncio.sleep(6.0) 
+        await asyncio.sleep(6.0) # Buffer for asset paint
         await target.screenshot(path=file_path)
         
         if os.path.exists(file_path):
@@ -89,23 +88,23 @@ async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
         text = await indicator.inner_text()
         match = re.search(r"of (\d+)", text)
         total_vars = int(match.group(1)) if match else 1
-        
         next_btn = page.locator(".variation-right-arrow").first
         
         for i in range(1, total_vars + 1):
+            # Targeted fix: Always grab the current visible slide
+            current_target = page.locator(".creative-sub-container:not(.hidden)").first
             v_path = os.path.join(advertiser_dir, f"{ad_id}_{i}.png")
-            # CHANGED: Increased to 4.5 for iFrame variation stability
+            
             await asyncio.sleep(4.5) 
-            await target.screenshot(path=v_path)
+            await current_target.screenshot(path=v_path)
             log(f"   📸 [Seq: {seq_num}] SAVED VAR {i}/{total_vars}: {ad_id}_{i}.png | {url}")
             
             if i < total_vars:
                 btn_class = await next_btn.get_attribute("class") or ""
                 if "is-disabled" not in btn_class:
                     await next_btn.click()
-                    await asyncio.sleep(2.0)
+                    await asyncio.sleep(2.5)
                 else:
-                    log(f"   🛑 [Seq: {seq_num}] WARN: Next button stuck at {i} | {url}")
                     break
     return "success"
 
@@ -123,16 +122,16 @@ async def process_link(context, row, seq_num, sem):
         page = await context.new_page()
         try:
             log(f"🚀 [Seq: {seq_num}] STARTING: {ad_id} | {url}")
-            # CHANGED: Using networkidle to ensure iFrames/Assets start loading
-            await page.goto(url, wait_until="networkidle", timeout=GTC_TIMEOUT)
+            # FIX: Using domcontentloaded to avoid the 60s tracker-loading timeout
+            await page.goto(url, wait_until="domcontentloaded", timeout=GTC_TIMEOUT)
             
             try:
-                await page.wait_for_selector(".creative-container, .empty-results, .policy-violation-banner", timeout=25000)
+                # Still wait for the core UI container to exist
+                await page.wait_for_selector(".header-container", timeout=25000)
             except:
                 pass
 
             if not await is_actually_dead(page, url, seq_num):
-                await asyncio.sleep(2) 
                 await handle_google_variations(page, advertiser_dir, ad_id, seq_num, url)
 
         except Exception as e:
@@ -153,7 +152,7 @@ async def main():
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context(
-            viewport={'width': 1280, 'height': 1400}, # Increased height for 300x600 ads
+            viewport={'width': 1280, 'height': 1400}, 
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
         )
         sem = asyncio.Semaphore(GTC_CONCURRENCY)
