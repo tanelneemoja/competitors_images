@@ -27,48 +27,29 @@ def extract_id_from_url(url):
     match = re.search(r"(?:creative/|id=)([A-Z0-9\d]+)", str(url))
     return match.group(1) if match else "unknown"
 
-# 🔥 FIXED
+# 🔥 FIXED: Added "Fletch-First" priority to prevent false GEO-skips
 async def is_actually_dead(page, url, seq_num):
-    iframe = page.locator("fletch-renderer iframe")
+    # If the fletch renderer or its iframe exists, the ad is ALIVE.
+    # We ignore empty/policy banners if this is present.
+    if await page.locator("fletch-renderer, iframe[src*='adframe']").count() > 0:
+        return False
 
-    # --- FIRST CHECK (fast path) ---
-    if await iframe.count() > 0:
-        try:
-            await iframe.first.wait_for(state="attached", timeout=5000)
-            box = await iframe.first.bounding_box()
-            if box and box["width"] > 50 and box["height"] > 50:
-                return False
-        except:
-            pass
-
-    # --- WAIT (prevents false empty) ---
-    await asyncio.sleep(3)
-
-    # --- SECOND CHECK (critical) ---
-    if await iframe.count() > 0:
-        try:
-            box = await iframe.first.bounding_box()
-            if box and box["width"] > 50 and box["height"] > 50:
-                return False
-        except:
-            pass
-
-    # --- TRUE EMPTY CHECK ---
     empty = page.locator(".empty-results").first
+    policy = page.locator(".policy-violation-banner").first
+
+    # Wait a moment to see if an ad pops in before we trust the 'empty' banner
+    if await empty.is_visible() or await policy.is_visible():
+        await asyncio.sleep(4.0)
+        
+        # Check again: did a fletch-renderer appear during the sleep?
+        if await page.locator("fletch-renderer").count() > 0:
+            return False
 
     if await empty.count() > 0 and await empty.is_visible():
         text = (await empty.inner_text()).lower()
-
-        if "can't find ad" in text or "not found in your region" in text:
+        if "can't find ad" in text or "not found in your region" in text or "no ads" in text:
             log(f"   ⚠️ [Seq: {seq_num}] SKIPPED: GEO / NOT FOUND | {url}")
             return True
-
-        if "no ads" in text:
-            log(f"   ⚠️ [Seq: {seq_num}] SKIPPED: Truly Empty | {url}")
-            return True
-
-    # --- POLICY CHECK ---
-    policy = page.locator(".policy-violation-banner").first
 
     if await policy.count() > 0 and await policy.is_visible():
         text = (await policy.inner_text()).lower()
@@ -78,15 +59,14 @@ async def is_actually_dead(page, url, seq_num):
 
     return False
 
-
 async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
     indicator = page.locator(".variation-index-indicator").first
     has_variations = await indicator.is_visible()
     
     locators = [
-        "fletch-renderer iframe",  # 🔥 FIX: prioritize iframe
-        "html-renderer img",           
-        "html-renderer",               
+        "fletch-renderer iframe", 
+        "html-renderer img",            
+        "html-renderer",                
         "iframe[src*='sadbundle']",    
         "fletch-renderer", 
         "iframe[src*='googlesyndication.com']",
@@ -112,10 +92,9 @@ async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
         file_path = os.path.join(advertiser_dir, f"{ad_id}.png")
         await asyncio.sleep(3.0)
 
-        # 🔥 Skip tiny/broken creatives
         box = await target.bounding_box()
-        if not box or box["height"] < 50:
-            log(f"   ⚠️ [Seq: {seq_num}] SKIPPED: Tiny/Invalid creative | {url}")
+        if not box or box["height"] < 10: # Lowered threshold slightly
+            log(f"   ⚠️ [Seq: {seq_num}] SKIPPED: Tiny creative | {url}")
             return "broken"
 
         await target.screenshot(path=file_path)
@@ -138,14 +117,15 @@ async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
             current_target = page.locator(
                 ".creative-sub-container:not(.hidden) fletch-renderer iframe"
             ).first
+            # Fallback for non-fletch variations
+            if await current_target.count() == 0:
+                current_target = page.locator(".creative-sub-container:not(.hidden)").first
 
             v_path = os.path.join(advertiser_dir, f"{ad_id}_{i}.png")
-
             await asyncio.sleep(2.0)
 
-            # 🔥 Skip tiny/broken creatives
             box = await current_target.bounding_box()
-            if not box or box["height"] < 50:
+            if not box or box["height"] < 10:
                 log(f"   ⚠️ [Seq: {seq_num}] SKIPPED VAR {i}: Tiny creative")
             else:
                 await current_target.screenshot(path=v_path)
