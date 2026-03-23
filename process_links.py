@@ -31,6 +31,12 @@ async def is_actually_dead(page, url, seq_num):
     """
     FIXED: Surgical check. If skeleton exists, wait 5s to see if content pops in.
     """
+    # --- FIX START ---
+    # If fletch is present, it is NOT dead. Ignore the banners.
+    if await page.locator("fletch-renderer").count() > 0:
+        return False
+    # --- FIX END ---
+
     empty = page.locator(".empty-results").first
     policy = page.locator(".policy-violation-banner").first
     
@@ -154,7 +160,6 @@ async def main():
         shards = np.array_split(df, total_shards)
         df = shards[shard_index]
 
-    # --- PRIORITY INJECTION FOR SHARD 0 ---
     if shard_index == 0:
         target_id = "CR14180549296201400321"
         mask = df['creative_page_url'].str.contains(target_id, na=False)
