@@ -27,72 +27,82 @@ def extract_id_from_url(url):
     match = re.search(r"(?:creative/|id=)([A-Z0-9\d]+)", str(url))
     return match.group(1) if match else "unknown"
 
-async def wait_for_real_iframe(page):
-    try:
-        await page.wait_for_function("""
-        () => {
-            const iframe = document.querySelector('fletch-renderer iframe');
-            if (!iframe) return false;
-            const rect = iframe.getBoundingClientRect();
-            return rect.width > 50 && rect.height > 50;
-        }
-        """, timeout=15000)
-        return True
-    except:
-        return False
-
+# 🔥 FIXED
 async def is_actually_dead(page, url, seq_num):
     iframe = page.locator("fletch-renderer iframe")
-    
+
+    # --- FIRST CHECK (fast path) ---
     if await iframe.count() > 0:
         try:
-            await iframe.first.wait_for(state="visible", timeout=10000)
-            if await wait_for_real_iframe(page):
+            await iframe.first.wait_for(state="attached", timeout=5000)
+            box = await iframe.first.bounding_box()
+            if box and box["width"] > 50 and box["height"] > 50:
                 return False
         except:
             pass
 
+    # --- WAIT (prevents false empty) ---
+    await asyncio.sleep(3)
+
+    # --- SECOND CHECK (critical) ---
+    if await iframe.count() > 0:
+        try:
+            box = await iframe.first.bounding_box()
+            if box and box["width"] > 50 and box["height"] > 50:
+                return False
+        except:
+            pass
+
+    # --- TRUE EMPTY CHECK ---
     empty = page.locator(".empty-results").first
-    policy = page.locator(".policy-violation-banner").first
-    
-    if await empty.is_visible() or await policy.is_visible():
-        await asyncio.sleep(5.0)
-        
-    if await empty.is_visible():
+
+    if await empty.count() > 0 and await empty.is_visible():
         text = (await empty.inner_text()).lower()
-        if "no ads" in text or "can't find" in text:
+
+        if "can't find ad" in text or "not found in your region" in text:
+            log(f"   ⚠️ [Seq: {seq_num}] SKIPPED: GEO / NOT FOUND | {url}")
+            return True
+
+        if "no ads" in text:
             log(f"   ⚠️ [Seq: {seq_num}] SKIPPED: Truly Empty | {url}")
             return True
-        
-    if await policy.is_visible():
+
+    # --- POLICY CHECK ---
+    policy = page.locator(".policy-violation-banner").first
+
+    if await policy.count() > 0 and await policy.is_visible():
         text = (await policy.inner_text()).lower()
         if "removed" in text or "violation" in text:
             log(f"   ⚠️ [Seq: {seq_num}] SKIPPED: Policy Violation | {url}")
             return True
-            
+
     return False
+
 
 async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
     indicator = page.locator(".variation-index-indicator").first
     has_variations = await indicator.is_visible()
-
-    # 🔥 Wait for actual ad render
-    await wait_for_real_iframe(page)
-
-    # 🔥 NEW TARGET LOGIC
+    
+    locators = [
+        "fletch-renderer iframe",  # 🔥 FIX: prioritize iframe
+        "html-renderer img",           
+        "html-renderer",               
+        "iframe[src*='sadbundle']",    
+        "fletch-renderer", 
+        "iframe[src*='googlesyndication.com']",
+        ".creative-sub-container:not(.hidden)", 
+        ".creative-container"
+    ]
+    
     target = None
-
-    iframe = page.locator("fletch-renderer iframe").first
-    if await iframe.count() > 0:
-        target = iframe
-
-    if not target:
-        for _ in range(5):
-            loc = page.locator(".creative-sub-container:not(.hidden)").first
-            if await loc.is_visible():
+    for _ in range(5):
+        for selector in locators:
+            loc = page.locator(selector).first
+            if await loc.count() > 0 and await loc.is_visible():
                 target = loc
                 break
-            await asyncio.sleep(2)
+        if target: break
+        await asyncio.sleep(2)
 
     if not target:
         log(f"   ❌ [Seq: {seq_num}] ERROR: Target missing in DOM | {url}")
@@ -101,23 +111,29 @@ async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
     if not has_variations:
         file_path = os.path.join(advertiser_dir, f"{ad_id}.png")
         await asyncio.sleep(3.0)
-        await target.screenshot(path=file_path)
 
+        # 🔥 Skip tiny/broken creatives
+        box = await target.bounding_box()
+        if not box or box["height"] < 50:
+            log(f"   ⚠️ [Seq: {seq_num}] SKIPPED: Tiny/Invalid creative | {url}")
+            return "broken"
+
+        await target.screenshot(path=file_path)
+        
         if os.path.exists(file_path):
             with open(file_path, "rb") as f:
                 if hashlib.md5(f.read()).hexdigest()[:8] == BAD_HASH:
                     log(f"   🗑️ [Seq: {seq_num}] DELETED: Blank Render Hash | {url}")
                     os.remove(file_path)
                     return "broken"
-
+        
         log(f"   ✅ [Seq: {seq_num}] SAVED: {ad_id}.png | {url}")
-
     else:
         text = await indicator.inner_text()
         match = re.search(r"of (\d+)", text)
         total_vars = int(match.group(1)) if match else 1
         next_btn = page.locator(".variation-right-arrow").first
-
+        
         for i in range(1, total_vars + 1):
             current_target = page.locator(
                 ".creative-sub-container:not(.hidden) fletch-renderer iframe"
@@ -125,12 +141,16 @@ async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
 
             v_path = os.path.join(advertiser_dir, f"{ad_id}_{i}.png")
 
-            await wait_for_real_iframe(page)
             await asyncio.sleep(2.0)
 
-            await current_target.screenshot(path=v_path)
-            log(f"   📸 [Seq: {seq_num}] SAVED VAR {i}/{total_vars}: {ad_id}_{i}.png | {url}")
-
+            # 🔥 Skip tiny/broken creatives
+            box = await current_target.bounding_box()
+            if not box or box["height"] < 50:
+                log(f"   ⚠️ [Seq: {seq_num}] SKIPPED VAR {i}: Tiny creative")
+            else:
+                await current_target.screenshot(path=v_path)
+                log(f"   📸 [Seq: {seq_num}] SAVED VAR {i}/{total_vars}: {ad_id}_{i}.png | {url}")
+            
             if i < total_vars:
                 btn_class = await next_btn.get_attribute("class") or ""
                 if "is-disabled" not in btn_class:
@@ -138,7 +158,6 @@ async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
                     await asyncio.sleep(2.5)
                 else:
                     break
-
     return "success"
 
 async def process_link(context, row, seq_num, sem):
