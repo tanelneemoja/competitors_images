@@ -72,12 +72,13 @@ async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
     ]
     
     target = None
-    for _ in range(5):
-        for selector in locators:
-            loc = page.locator(selector).first
-            if await loc.is_visible():
-                target = loc
-                break
+    try:
+    if await loc.count() > 0:
+        await loc.bounding_box()
+        target = loc
+        break
+except:
+    pass
         if target: break
         await asyncio.sleep(2)
 
