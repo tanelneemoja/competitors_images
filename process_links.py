@@ -36,14 +36,14 @@ def extract_id_from_url(url):
 async def is_actually_dead(page):
     """
     Surgical check for GTC death states.
-    Uses the 'empty-results' class found in your HTML dump.
+    Uses .is_visible() and .inner_text() to ignore hidden 'policy violation' divs.
     """
-    # 1. Check for the specific 'Can't find ad' block
+    # 1. Check for the 'Can't find ad' block from your HTML dump
     error_block = page.locator(".empty-results")
     if await error_block.is_visible():
         return True
 
-    # 2. Check for visible text only (ignores hidden policy violation divs)
+    # 2. Check for visible text only
     death_signals = [
         "Can't find ad",
         "ad with this ID was not found",
@@ -53,7 +53,6 @@ async def is_actually_dead(page):
     
     visible_text = await page.inner_text("body")
     if any(signal in visible_text for signal in death_signals):
-        # Grace period for GTC loading flickers
         await asyncio.sleep(3) 
         visible_text_retry = await page.inner_text("body")
         return any(signal in visible_text_retry for signal in death_signals)
@@ -76,36 +75,35 @@ async def process_link(context, row, seq_num, gtc_sem, meta_sem):
         for attempt in range(max_attempts):
             page = await context.new_page()
             try:
-                log(f"🔍 [Seq: {seq_num}] Start: {ad_id}")
+                # --- START LOG ---
+                log(f"🔍 [Seq: {seq_num}] START: {ad_id} | {url}")
+                
                 await page.goto(url, wait_until="domcontentloaded", timeout=timeout)
                 
                 if is_google:
-                    # Wait for either the image container or the error block
                     try:
                         await page.wait_for_selector("html-renderer img, fletch-renderer, .empty-results", timeout=25000)
                     except:
                         pass 
 
-                # Run the visibility-based death check
+                # Check if actually dead (Visible only)
                 if await is_actually_dead(page):
-                    log(f"   ⏩ [Seq: {seq_num}] SKIPPED: Ad confirmed unavailable. (Verified Visible)")
+                    log(f"   ⏩ [Seq: {seq_num}] SKIPPED: Ad dead/unavailable.")
+                    log(f"      URL: {url}")
                     stats["broken"] += 1
                     await page.close()
                     return
 
-                # Settle time for rendering
                 await page.wait_for_timeout(5000) 
 
                 target = None
                 if is_google:
-                    # Selectors based on your provided HTML structure
                     for selector in ["html-renderer", "fletch-renderer", ".creative-container"]:
                         loc = page.locator(selector).first
                         if await loc.count() > 0:
                             target = loc
                             break
                 else:
-                    # Meta Selector
                     meta_card = page.locator(f"div:has-text('Library ID: {ad_id}')").locator("xpath=ancestor::div[contains(@class, '_8n-a')]").first
                     if await meta_card.count() > 0:
                         target = meta_card
@@ -120,13 +118,14 @@ async def process_link(context, row, seq_num, gtc_sem, meta_sem):
 
                     if img_hash == BAD_HASH:
                         os.remove(file_path)
-                        log(f"   ⏩ [Seq: {seq_num}] SKIPPED: Dead Hash detected.")
+                        log(f"   ⏩ [Seq: {seq_num}] SKIPPED: Dead Hash ({img_hash}).")
+                        log(f"      URL: {url}")
                         stats["broken"] += 1
                         await page.close()
                         return
 
                     status = "REPLACED" if exists_before else "ADDED"
-                    log(f"   📸 [Seq: {seq_num}] {status}: {ad_id}.png")
+                    log(f"   📸 [Seq: {seq_num}] {status}: {ad_id}.png [Hash:{img_hash}]")
                     log(f"      URL: {url}")
                     
                     if status == "REPLACED": stats["replaced"] += 1
@@ -140,12 +139,13 @@ async def process_link(context, row, seq_num, gtc_sem, meta_sem):
             except Exception as e:
                 err_msg = str(e).split('\n')[0][:60]
                 if is_google and attempt < MAX_GTC_RETRIES:
-                    log(f"   ⚠️ [Seq: {seq_num}] {err_msg}. Retrying...")
+                    log(f"   ⚠️ [Seq: {seq_num}] {err_msg}. Retrying GTC...")
                     await page.close()
                     await asyncio.sleep(2)
                     continue
                 else:
                     log(f"   ❌ [Seq: {seq_num}] FAIL: {err_msg}")
+                    log(f"      URL: {url}")
                     audit_log.append({"seq": seq_num, "id": ad_id, "reason": err_msg, "url": url})
                     stats["failed"] += 1
             
@@ -156,6 +156,7 @@ async def main():
         print(f"Error: {CSV_FILE} not found.")
         return
     df = pd.read_csv(CSV_FILE)
+    start_time = datetime.now()
     
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
@@ -171,7 +172,9 @@ async def main():
         await asyncio.gather(*tasks)
         await browser.close()
 
+    duration = datetime.now() - start_time
     print("\n" + "="*40)
+    print(f"FINISHED IN: {str(duration).split('.')[0]}")
     print(f"✅ NEW: {stats['new']} | 🔄 REPLACED: {stats['replaced']} | ⏩ SKIPPED: {stats['broken']} | ❌ FAIL: {stats['failed']}")
     print("="*40)
 
