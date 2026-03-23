@@ -38,30 +38,27 @@ async def process_link(context, row, seq_num, total, semaphore):
         try:
             log(f"🔍 [Seq: {seq_num}] Target ID: {ad_id}")
             
+            # Use 'networkidle' to ensure Meta's JS error messages finish loading
             await page.goto(url, wait_until="networkidle", timeout=GTC_TIMEOUT)
-            await asyncio.sleep(2) 
-
-            # 1. ENHANCED EXPIRED CHECK
-            # We search for the specific text found in your provided HTML
+            
+            # --- 1. THE RIGID DEATH CHECK ---
+            # We pull the entire text content of the body to catch hidden errors
+            page_content = await page.content()
+            
             unavailable_markers = [
                 "This content isn't available right now",
                 "it's been deleted",
-                "isn't available",
-                "Can't find ad"
+                "changed who can see it",
+                "isn't available"
             ]
             
-            is_dead = False
-            for marker in unavailable_markers:
-                if await page.get_by_text(marker).first.is_visible():
-                    is_dead = True
-                    break
-            
-            if is_dead:
-                log(f"   ⏩ [Seq: {seq_num}] SKIPPED: Ad is deleted/unavailable.")
+            if any(marker in page_content for marker in unavailable_markers):
+                log(f"   ⏩ [Seq: {seq_num}] SKIPPED: Ad is confirmed unavailable/deleted.")
                 stats["broken"] += 1
                 return
 
-            # 2. TARGETING LOGIC
+            # --- 2. TARGETING LOGIC ---
+            # Try Meta Card ID first, then Google href, then generic container
             meta_id_locator = page.locator(f"div:has-text('Library ID: {ad_id}')").locator("xpath=ancestor::div[contains(@class, '_8n-a')]").first
             gtc_href_locator = page.locator(f"a[href*='{ad_id}']").first
             generic_meta = page.locator('[data-testid="ad-library-dynamic-content-container"]').first
@@ -75,46 +72,22 @@ async def process_link(context, row, seq_num, total, semaphore):
                 target_element = generic_meta
 
             if not target_element:
-                reason = "No valid ad container found (Page loaded but ID missing)"
+                reason = "No ad container found (Page loaded but ID missing)"
                 log(f"   ⚠️ [Seq: {seq_num}] FAIL: {reason}")
                 audit_log.append({"seq": seq_num, "id": ad_id, "reason": reason, "url": url})
                 stats["failed"] += 1
                 return
 
-            # 3. CAPTURE LOGIC
-            next_btn = page.locator('div[role="button"][aria-label*="Next"], button[aria-label*="Next"]').first
-            is_carousel = await next_btn.is_visible()
-
-            if is_carousel:
-                slide_idx = 1
-                while True:
-                    file_name = f"{ad_id}_{slide_idx}.png"
-                    file_path = os.path.join(advertiser_dir, file_name)
-                    status = "REPLACED" if os.path.exists(file_path) else "ADDED"
-                    
-                    await target_element.screenshot(path=file_path)
-                    log(f"   📸 [Seq: {seq_num}] {status}: {file_name} (Carousel)")
-                    
-                    if status == "REPLACED": stats["replaced"] += 1
-                    else: stats["new"] += 1
-
-                    if await next_btn.is_visible() and not (await next_btn.get_attribute("aria-disabled") == "true"):
-                        await next_btn.click()
-                        await asyncio.sleep(1.5)
-                        slide_idx += 1
-                        if slide_idx > 10: break
-                    else:
-                        break
-            else:
-                file_name = f"{ad_id}.png"
-                file_path = os.path.join(advertiser_dir, file_name)
-                status = "REPLACED" if os.path.exists(file_path) else "ADDED"
-                
-                await target_element.screenshot(path=file_path)
-                log(f"   📸 [Seq: {seq_num}] {status}: {file_name}")
-                
-                if status == "REPLACED": stats["replaced"] += 1
-                else: stats["new"] += 1
+            # --- 3. CAPTURE LOGIC ---
+            file_name = f"{ad_id}.png"
+            file_path = os.path.join(advertiser_dir, file_name)
+            status = "REPLACED" if os.path.exists(file_path) else "ADDED"
+            
+            await target_element.screenshot(path=file_path)
+            log(f"   📸 [Seq: {seq_num}] {status}: {file_name}")
+            
+            if status == "REPLACED": stats["replaced"] += 1
+            else: stats["new"] += 1
 
         except Exception as e:
             err = str(e).split('\n')[0][:60]
@@ -125,31 +98,41 @@ async def process_link(context, row, seq_num, total, semaphore):
             await page.close()
 
 async def main():
-    if not os.path.exists(CSV_FILE): return
+    if not os.path.exists(CSV_FILE):
+        print(f"Error: {CSV_FILE} not found.")
+        return
+
     df = pd.read_csv(CSV_FILE)
+    total_tasks = len(df)
     
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context(
-            viewport={'width': 1280, 'height': 1400},
+            viewport={'width': 1280, 'height': 1200},
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
         )
         
         semaphore = asyncio.Semaphore(CONCURRENCY_LIMIT)
-        tasks = [process_link(context, row, i, len(df), semaphore) for i, (_, row) in enumerate(df.iterrows(), 1)]
+        tasks = [process_link(context, row, i, total_tasks, semaphore) for i, (_, row) in enumerate(df.iterrows(), 1)]
         await asyncio.gather(*tasks)
         await browser.close()
 
-    print("\n" + "="*30)
+    # --- FINAL AUDIT LOG ---
+    print("\n" + "="*40)
+    print(f"SCRAPE FINISHED | TOTAL PROCESSED: {total_tasks}")
+    print("="*40)
     print(f"✅ NEW:      {stats['new']}")
     print(f"🔄 REPLACED: {stats['replaced']}")
-    print(f"⏩ EXPIRED:  {stats['broken']}")
+    print(f"⏩ BROKEN:   {stats['broken']} (Unavailable/Deleted)")
     print(f"❌ FAILED:   {stats['failed']}")
     
     if audit_log:
-        print("\n" + "!"*10 + " FAILURE LOG " + "!"*10)
-        for f in audit_log:
-            print(f"Row {f['seq']} | {f['id']}: {f['reason']}")
+        print("\n" + "!"*15 + " FAILURE AUDIT LIST " + "!"*15)
+        for entry in audit_log:
+            print(f"Row {entry['seq']} | ID: {entry['id']}")
+            print(f"Reason: {entry['reason']}")
+            print(f"URL: {entry['url']}")
+            print("-" * 30)
 
 if __name__ == "__main__":
     asyncio.run(main())
