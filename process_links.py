@@ -9,7 +9,8 @@ import hashlib
 # --- CONFIGURATION ---
 CSV_FILE = "meta_google_ads_links(in).csv"
 BASE_DATA_DIR = "data"
-# Dynamic Concurrency
+
+# Dual-Speed Concurrency
 GTC_CONCURRENCY = 5
 META_CONCURRENCY = 15
 
@@ -32,77 +33,73 @@ def extract_id_from_url(url):
     match = re.search(r"(?:creative/|id=|id=)([A-Z0-9\d]+)", str(url))
     return match.group(1) if match else "unknown"
 
+async def is_actually_dead(page):
+    """Double-check death signals to avoid false positives on slow-loading GTC ads."""
+    death_signals = [
+        "This content isn't available right now", 
+        "it's been deleted",                      
+        "An ad with this ID was not found",
+        "Removed for a policy violation"
+    ]
+    content = await page.content()
+    if any(signal in content for signal in death_signals):
+        # If signal found, wait 3s and check again to be sure it wasn't just a loading state
+        await asyncio.sleep(3)
+        content_retry = await page.content()
+        return any(signal in content_retry for signal in death_signals)
+    return False
+
 async def process_link(context, row, seq_num, gtc_sem, meta_sem):
     url = str(row.get('creative_page_url', ''))
     is_google = "adstransparency.google.com" in url
-    
-    # Select the appropriate semaphore based on the platform
     semaphore = gtc_sem if is_google else meta_sem
     
     async with semaphore:
         advertiser = sanitize_filename(row.get('advertiser_name', 'Unknown'))
         ad_id = extract_id_from_url(url)
-        
         max_attempts = (MAX_GTC_RETRIES + 1) if is_google else 1
         timeout = GTC_TIMEOUT if is_google else META_TIMEOUT
-
         advertiser_dir = os.path.join(BASE_DATA_DIR, advertiser)
         os.makedirs(advertiser_dir, exist_ok=True)
 
         for attempt in range(max_attempts):
             page = await context.new_page()
             try:
-                attempt_pfx = f" (Attempt {attempt+1})" if attempt > 0 else ""
-                log(f"🔍 [Seq: {seq_num}] Target ID: {ad_id}{attempt_pfx}")
-                
-                # Using domcontentloaded to stay fast on Meta and avoid GTC tracker hangs
+                log(f"🔍 [Seq: {seq_num}] Target ID: {ad_id} {'(Retry)' if attempt > 0 else ''}")
                 await page.goto(url, wait_until="domcontentloaded", timeout=timeout)
                 
+                # GTC specific: Wait for any of our known valid containers to exist
                 if is_google:
                     try:
                         await page.wait_for_selector("fletch-renderer, html-renderer, .creative-container", timeout=15000)
                     except:
                         pass 
-                
-                await page.wait_for_timeout(5000) 
 
-                content = await page.content()
-                visible_text = await page.inner_text("body")
-                
-                death_signals = [
-                    "This content isn't available right now", 
-                    "it's been deleted",                      
-                    "An ad with this ID was not found",
-                    "Removed for a policy violation",
-                    "Sorry, we're not able to show you this ad"
-                ]
-                
-                if any(signal in visible_text or signal in content for signal in death_signals):
-                    log(f"   ⏩ [Seq: {seq_num}] SKIPPED: Ad is unavailable.")
-                    log(f"      URL: {url}")
+                # The "False Positive" Fix: Verify death signals only after a small grace period
+                if await is_actually_dead(page):
+                    log(f"   ⏩ [Seq: {seq_num}] SKIPPED: Confirmed unavailable.")
                     stats["broken"] += 1
                     await page.close()
                     return
 
+                await page.wait_for_timeout(4000) # Final settle time
+
                 target = None
                 if is_google:
-                    gtc_selectors = ["fletch-renderer", "html-renderer", ".creative-container"]
-                    for selector in gtc_selectors:
+                    for selector in ["fletch-renderer", "html-renderer", ".creative-container"]:
                         loc = page.locator(selector).first
                         if await loc.count() > 0:
                             target = loc
                             break
                 else:
-                    # Meta targeting logic
+                    # Meta Targeting
                     meta_card = page.locator(f"div:has-text('Library ID: {ad_id}')").locator("xpath=ancestor::div[contains(@class, '_8n-a')]").first
                     if await meta_card.count() > 0:
                         target = meta_card
                 
                 if target:
-                    file_name = f"{ad_id}.png"
-                    file_path = os.path.join(advertiser_dir, file_name)
+                    file_path = os.path.join(advertiser_dir, f"{ad_id}.png")
                     exists_before = os.path.exists(file_path)
-                    
                     await target.screenshot(path=file_path)
                     
                     with open(file_path, "rb") as f:
@@ -110,14 +107,13 @@ async def process_link(context, row, seq_num, gtc_sem, meta_sem):
 
                     if img_hash == BAD_HASH:
                         os.remove(file_path)
-                        log(f"   ⏩ [Seq: {seq_num}] SKIPPED: Ad dead (Hash Detection {img_hash}).")
-                        log(f"      URL: {url}")
+                        log(f"   ⏩ [Seq: {seq_num}] SKIPPED: Ad dead (Hash {img_hash}).")
                         stats["broken"] += 1
                         await page.close()
                         return
 
                     status = "REPLACED" if exists_before else "ADDED"
-                    log(f"   📸 [Seq: {seq_num}] {status}: {file_name} [Hash:{img_hash}]")
+                    log(f"   📸 [Seq: {seq_num}] {status}: {ad_id}.png [Hash:{img_hash}]")
                     log(f"      URL: {url}")
                     
                     if status == "REPLACED": stats["replaced"] += 1
@@ -126,14 +122,14 @@ async def process_link(context, row, seq_num, gtc_sem, meta_sem):
                     return 
                 
                 else:
-                    raise Exception("No valid ad container found")
+                    raise Exception("No ad container found after loading.")
 
             except Exception as e:
                 err_msg = str(e).split('\n')[0][:60]
                 if is_google and attempt < MAX_GTC_RETRIES:
-                    log(f"   ⚠️ [Seq: {seq_num}] {err_msg}. Retrying...")
+                    log(f"   ⚠️ [Seq: {seq_num}] {err_msg}. Retrying GTC...")
                     await page.close()
-                    await asyncio.sleep(3)
+                    await asyncio.sleep(2)
                     continue
                 else:
                     log(f"   ❌ [Seq: {seq_num}] FAIL: {err_msg}")
@@ -145,9 +141,10 @@ async def process_link(context, row, seq_num, gtc_sem, meta_sem):
 
 async def main():
     if not os.path.exists(CSV_FILE): 
-        log(f"Error: {CSV_FILE} not found.")
+        print(f"Error: {CSV_FILE} not found.")
         return
     df = pd.read_csv(CSV_FILE)
+    start_time = datetime.now()
     
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
@@ -156,7 +153,6 @@ async def main():
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
         )
         
-        # Initialize two separate semaphores
         gtc_sem = asyncio.Semaphore(GTC_CONCURRENCY)
         meta_sem = asyncio.Semaphore(META_CONCURRENCY)
         
@@ -164,20 +160,11 @@ async def main():
         await asyncio.gather(*tasks)
         await browser.close()
 
+    duration = datetime.now() - start_time
     print("\n" + "="*40)
-    print(f"RUN COMPLETE - {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    print(f"FINISHED IN: {str(duration).split('.')[0]}")
+    print(f"✅ NEW: {stats['new']} | 🔄 REPLACED: {stats['replaced']} | ⏩ SKIPPED: {stats['broken']} | ❌ FAIL: {stats['failed']}")
     print("="*40)
-    print(f"✅ NEW:      {stats['new']}")
-    print(f"🔄 REPLACED: {stats['replaced']}")
-    print(f"⏩ BROKEN:   {stats['broken']}")
-    print(f"❌ FAILED:   {stats['failed']}")
-    
-    if audit_log:
-        print("\n" + "!"*15 + " FAILURE SUMMARY " + "!"*15)
-        for f in audit_log:
-            print(f"Row {f['seq']} | ID: {f['id']} | {f['reason']}")
-            print(f"URL: {f['url']}")
-            print("-" * 30)
 
 if __name__ == "__main__":
     asyncio.run(main())
