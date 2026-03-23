@@ -32,17 +32,15 @@ def extract_id_from_url(url):
     return match.group(1) if match else "unknown"
 
 
-# 🔥 FIX 1: STRONG iframe validation (replaces old logic)
+# 🔥 FIX 1: Improved dead check
 async def is_actually_dead(page, url, seq_num):
     iframe = page.locator("fletch-renderer iframe").first
 
-    # --- HARD WAIT FOR IFRAME ATTACH ---
     try:
         await iframe.wait_for(state="attached", timeout=10000)
     except:
         pass
 
-    # --- WAIT FOR RENDER (CRITICAL FIX) ---
     for _ in range(5):
         try:
             box = await iframe.bounding_box()
@@ -55,13 +53,12 @@ async def is_actually_dead(page, url, seq_num):
             ) or (
                 height_attr and int(height_attr) > 100
             ):
-                return False  # ✅ VALID AD
+                return False
         except:
             pass
 
         await asyncio.sleep(2)
 
-    # --- POLICY CHECK ---
     policy = page.locator(".policy-violation-banner").first
     if await policy.count() > 0 and await policy.is_visible():
         text = (await policy.inner_text()).lower()
@@ -69,7 +66,6 @@ async def is_actually_dead(page, url, seq_num):
             log(f"   ⚠️ [Seq: {seq_num}] SKIPPED: Policy Violation | {url}")
             return True
 
-    # --- REAL EMPTY CHECK ---
     empty = page.locator(".empty-results").first
     if await empty.count() > 0:
         try:
@@ -86,12 +82,11 @@ async def is_actually_dead(page, url, seq_num):
         except:
             pass
 
-    # --- FALLBACK ---
     log(f"   ⚠️ [Seq: {seq_num}] UNCERTAIN → Treating as DEAD | {url}")
     return True
 
 
-# 🔥 FIX 2 already present: iframe prioritized
+# 🔥 FIX 2: Removed visibility requirement
 async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
     indicator = page.locator(".variation-index-indicator").first
     has_variations = await indicator.is_visible()
@@ -111,7 +106,7 @@ async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
     for _ in range(5):
         for selector in locators:
             loc = page.locator(selector).first
-            if await loc.count() > 0 and await loc.is_visible():
+            if await loc.count() > 0:  # 🔥 FIX HERE
                 target = loc
                 break
         if target:
