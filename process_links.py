@@ -39,57 +39,54 @@ async def process_link(context, row, seq_num, total, semaphore):
         try:
             log(f"🔍 [Seq: {seq_num}] Target ID: {ad_id}")
             
-            # 1. LOAD
-            await page.goto(url, wait_until="domcontentloaded", timeout=GTC_TIMEOUT)
-            # Wait for the specific Meta error text or the Library ID to appear
-            try:
-                await page.wait_for_selector("body", timeout=10000)
-            except:
-                pass
+            # 1. LOAD & WAIT FOR RENDER
+            await page.goto(url, wait_until="networkidle", timeout=GTC_TIMEOUT)
+            await asyncio.sleep(2) # Necessary for Shadow DOM / Iframe error messages to pop in
 
-            # 2. THE RIGID VISIBLE TEXT CHECK
-            # inner_text only gets what a HUMAN sees on the screen
-            visible_text = await page.inner_text("body")
-            
-            death_signals = [
-                "This content isn't available right now",
-                "it's been deleted",
-                "changed who can see it"
-            ]
+            # 2. THE NUCLEAR DEATH CHECK (Triple Validation)
+            # A. Check raw HTML for the "not available" string
+            content = await page.content()
+            # B. Check for the unique "Go to Feed" button link that only exists on Error Pages
+            error_button = page.locator('a[aria-label="Go to Feed"]').first
+            # C. Check for the specific "This content isn't available" text
+            is_error_page = (
+                "This content isn't available right now" in content or 
+                "it's been deleted" in content or 
+                await error_button.is_visible()
+            )
 
-            if any(signal in visible_text for signal in death_signals):
-                log(f"   ⏩ [Seq: {seq_num}] SKIPPED: Meta Error Page detected (Ad Deleted).")
+            if is_error_page:
+                log(f"   ⏩ [Seq: {seq_num}] SKIPPED: Confirmed Meta Error Page (Ad Dead).")
                 stats["broken"] += 1
                 return
 
-            # 3. TARGETING THE CARD
-            # We strictly look for the container that actually holds the Library ID
-            card_locator = page.locator(f"div:has-text('Library ID: {ad_id}')").locator("xpath=ancestor::div[contains(@class, '_8n-a')]").first
-            
-            # Fallback for Google GTC
-            gtc_locator = page.locator(f"a[href*='{ad_id}']").first
+            # 3. TARGETING THE REAL AD CONTAINER
+            # We look for the card that specifically mentions the ID in the "Library ID: XXX" span
+            card_selector = f"div:has-text('Library ID: {ad_id}')"
+            # We then go to the ancestor that represents the whole card
+            meta_card = page.locator(card_selector).locator("xpath=ancestor::div[contains(@class, '_8n-a')]").first
+            gtc_ad = page.locator(f"a[href*='{ad_id}']").first
 
             target = None
-            if await card_locator.count() > 0:
-                target = card_locator
-            elif await gtc_locator.count() > 0:
-                target = gtc_locator
+            if await meta_card.count() > 0:
+                target = meta_card
+            elif await gtc_ad.count() > 0:
+                target = gtc_ad
 
             if not target:
-                reason = "Live ad found, but specific ID container missing."
+                reason = "No valid ad container found (Page loaded but no ad card)."
                 log(f"   ⚠️ [Seq: {seq_num}] FAIL: {reason}")
                 audit_log.append({"seq": seq_num, "id": ad_id, "reason": reason, "url": url})
                 stats["failed"] += 1
                 return
 
-            # 4. CAPTURE & VERIFY
+            # 4. CAPTURE & HASH LOGGING
             file_name = f"{ad_id}.png"
             file_path = os.path.join(advertiser_dir, file_name)
-            
             status = "REPLACED" if os.path.exists(file_path) else "ADDED"
+            
             await target.screenshot(path=file_path)
             
-            # Create a simple hash of the file to "see" if it's the same error image
             with open(file_path, "rb") as f:
                 img_hash = hashlib.md5(f.read()).hexdigest()[:8]
 
@@ -123,16 +120,16 @@ async def main():
         await asyncio.gather(*tasks)
         await browser.close()
 
-    print("\n" + "="*30)
+    print("\n" + "="*40)
     print(f"✅ NEW:      {stats['new']}")
     print(f"🔄 REPLACED: {stats['replaced']}")
     print(f"⏩ BROKEN:   {stats['broken']} (Unavailable)")
     print(f"❌ FAILED:   {stats['failed']}")
     
     if audit_log:
-        print("\n" + "!"*10 + " AUDIT LOG " + "!"*10)
+        print("\n" + "!"*15 + " FAILURE AUDIT " + "!"*15)
         for f in audit_log:
-            print(f"Seq {f['seq']} | {f['id']} | {f['reason']}\nURL: {f['url']}\n")
+            print(f"Seq {f['seq']} | {f['id']}\nURL: {f['url']}\nReason: {f['reason']}\n" + "-"*30)
 
 if __name__ == "__main__":
     asyncio.run(main())
