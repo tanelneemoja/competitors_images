@@ -10,65 +10,103 @@ import numpy as np
 # --- CONFIGURATION ---
 CSV_FILE = "meta_google_ads_links(in).csv"
 BASE_DATA_DIR = "data"
-GTC_CONCURRENCY = 5  
-GTC_TIMEOUT = 60000  
+GTC_CONCURRENCY = 5
+GTC_TIMEOUT = 60000
+
 BAD_HASH = "f1813cb9"
 
-PROCESS_META = False 
+PROCESS_META = False
 PROCESS_GOOGLE = True
+
 
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
+
 def sanitize_filename(name):
     return re.sub(r'[<>:"/\\|?*]', '', str(name or "Unknown")).strip()
+
 
 def extract_id_from_url(url):
     match = re.search(r"(?:creative/|id=)([A-Z0-9\d]+)", str(url))
     return match.group(1) if match else "unknown"
 
-# 🔥 FIXED: Added "Fletch-First" priority to prevent false GEO-skips
+
+# 🔥 FIX 1: STRONG iframe validation (replaces old logic)
 async def is_actually_dead(page, url, seq_num):
-    # If the fletch renderer or its iframe exists, the ad is ALIVE.
-    # We ignore empty/policy banners if this is present.
-    if await page.locator("fletch-renderer, iframe[src*='adframe']").count() > 0:
-        return False
+    iframe = page.locator("fletch-renderer iframe").first
 
-   # --- TRUE EMPTY CHECK ---
-empty = page.locator(".empty-results").first
+    # --- HARD WAIT FOR IFRAME ATTACH ---
+    try:
+        await iframe.wait_for(state="attached", timeout=10000)
+    except:
+        pass
 
-if await empty.count() > 0 and await empty.is_visible():
-    text = (await empty.inner_text()).lower()
+    # --- WAIT FOR RENDER (CRITICAL FIX) ---
+    for _ in range(5):
+        try:
+            box = await iframe.bounding_box()
+            height_attr = await iframe.get_attribute("height")
 
-    # 🔥 ONLY treat as GEO if region text is explicitly present
-    if "not found in your region" in text:
-        log(f"   ⚠️ [Seq: {seq_num}] SKIPPED: GEO / NOT FOUND | {url}")
-        return True
+            if (
+                box
+                and box["width"] > 100
+                and box["height"] > 100
+            ) or (
+                height_attr and int(height_attr) > 100
+            ):
+                return False  # ✅ VALID AD
+        except:
+            pass
 
-    # 🔥 Treat generic "Can't find ad" WITHOUT region text as BROKEN (not GEO)
-    if "can't find ad" in text:
-        log(f"   ⚠️ [Seq: {seq_num}] SKIPPED: BROKEN / UNKNOWN | {url}")
-        return True
+        await asyncio.sleep(2)
 
-    if "no ads" in text:
-        log(f"   ⚠️ [Seq: {seq_num}] SKIPPED: Truly Empty | {url}")
-        return True
+    # --- POLICY CHECK ---
+    policy = page.locator(".policy-violation-banner").first
+    if await policy.count() > 0 and await policy.is_visible():
+        text = (await policy.inner_text()).lower()
+        if "removed" in text or "violation" in text:
+            log(f"   ⚠️ [Seq: {seq_num}] SKIPPED: Policy Violation | {url}")
+            return True
 
+    # --- REAL EMPTY CHECK ---
+    empty = page.locator(".empty-results").first
+    if await empty.count() > 0:
+        try:
+            if await empty.is_visible():
+                text = (await empty.inner_text()).lower()
+
+                if "can't find ad" in text or "not found in your region" in text:
+                    log(f"   ⚠️ [Seq: {seq_num}] SKIPPED: GEO / NOT FOUND | {url}")
+                    return True
+
+                if "no ads" in text:
+                    log(f"   ⚠️ [Seq: {seq_num}] SKIPPED: Truly Empty | {url}")
+                    return True
+        except:
+            pass
+
+    # --- FALLBACK ---
+    log(f"   ⚠️ [Seq: {seq_num}] UNCERTAIN → Treating as DEAD | {url}")
+    return True
+
+
+# 🔥 FIX 2 already present: iframe prioritized
 async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
     indicator = page.locator(".variation-index-indicator").first
     has_variations = await indicator.is_visible()
-    
+
     locators = [
-        "fletch-renderer iframe", 
-        "html-renderer img",            
-        "html-renderer",                
-        "iframe[src*='sadbundle']",    
-        "fletch-renderer", 
+        "fletch-renderer iframe",
+        "html-renderer img",
+        "html-renderer",
+        "iframe[src*='sadbundle']",
+        "fletch-renderer",
         "iframe[src*='googlesyndication.com']",
-        ".creative-sub-container:not(.hidden)", 
+        ".creative-sub-container:not(.hidden)",
         ".creative-container"
     ]
-    
+
     target = None
     for _ in range(5):
         for selector in locators:
@@ -76,7 +114,8 @@ async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
             if await loc.count() > 0 and await loc.is_visible():
                 target = loc
                 break
-        if target: break
+        if target:
+            break
         await asyncio.sleep(2)
 
     if not target:
@@ -88,44 +127,43 @@ async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
         await asyncio.sleep(3.0)
 
         box = await target.bounding_box()
-        if not box or box["height"] < 10: # Lowered threshold slightly
-            log(f"   ⚠️ [Seq: {seq_num}] SKIPPED: Tiny creative | {url}")
+        if not box or box["height"] < 50:
+            log(f"   ⚠️ [Seq: {seq_num}] SKIPPED: Tiny/Invalid creative | {url}")
             return "broken"
 
         await target.screenshot(path=file_path)
-        
+
         if os.path.exists(file_path):
             with open(file_path, "rb") as f:
                 if hashlib.md5(f.read()).hexdigest()[:8] == BAD_HASH:
                     log(f"   🗑️ [Seq: {seq_num}] DELETED: Blank Render Hash | {url}")
                     os.remove(file_path)
                     return "broken"
-        
+
         log(f"   ✅ [Seq: {seq_num}] SAVED: {ad_id}.png | {url}")
+
     else:
         text = await indicator.inner_text()
         match = re.search(r"of (\d+)", text)
         total_vars = int(match.group(1)) if match else 1
         next_btn = page.locator(".variation-right-arrow").first
-        
+
         for i in range(1, total_vars + 1):
             current_target = page.locator(
                 ".creative-sub-container:not(.hidden) fletch-renderer iframe"
             ).first
-            # Fallback for non-fletch variations
-            if await current_target.count() == 0:
-                current_target = page.locator(".creative-sub-container:not(.hidden)").first
 
             v_path = os.path.join(advertiser_dir, f"{ad_id}_{i}.png")
+
             await asyncio.sleep(2.0)
 
             box = await current_target.bounding_box()
-            if not box or box["height"] < 10:
+            if not box or box["height"] < 50:
                 log(f"   ⚠️ [Seq: {seq_num}] SKIPPED VAR {i}: Tiny creative")
             else:
                 await current_target.screenshot(path=v_path)
                 log(f"   📸 [Seq: {seq_num}] SAVED VAR {i}/{total_vars}: {ad_id}_{i}.png | {url}")
-            
+
             if i < total_vars:
                 btn_class = await next_btn.get_attribute("class") or ""
                 if "is-disabled" not in btn_class:
@@ -133,12 +171,14 @@ async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
                     await asyncio.sleep(2.5)
                 else:
                     break
+
     return "success"
+
 
 async def process_link(context, row, seq_num, sem):
     url = str(row.get('creative_page_url', ''))
     if "adstransparency.google.com" not in url:
-        return 
+        return
 
     async with sem:
         advertiser = sanitize_filename(row.get('advertiser_name', 'Unknown'))
@@ -150,7 +190,7 @@ async def process_link(context, row, seq_num, sem):
         try:
             log(f"🚀 [Seq: {seq_num}] STARTING: {ad_id} | {url}")
             await page.goto(url, wait_until="domcontentloaded", timeout=GTC_TIMEOUT)
-            
+
             try:
                 await page.wait_for_selector(".ad-container", timeout=20000)
             except:
@@ -164,12 +204,16 @@ async def process_link(context, row, seq_num, sem):
         finally:
             await page.close()
 
+
 async def main():
-    if not os.path.exists(CSV_FILE): return
+    if not os.path.exists(CSV_FILE):
+        return
+
     df = pd.read_csv(CSV_FILE)
 
     total_shards = int(os.environ.get("SHARD_COUNT", 1))
     shard_index = int(os.environ.get("SHARD_INDEX", 0))
+
     if total_shards > 1:
         shards = np.array_split(df, total_shards)
         df = shards[shard_index]
@@ -185,13 +229,20 @@ async def main():
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context(
-            viewport={'width': 1280, 'height': 1400}, 
+            viewport={'width': 1280, 'height': 1400},
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
         )
+
         sem = asyncio.Semaphore(GTC_CONCURRENCY)
-        tasks = [process_link(context, row, i, sem) for i, (_, row) in enumerate(df.iterrows(), 1)]
+
+        tasks = [
+            process_link(context, row, i, sem)
+            for i, (_, row) in enumerate(df.iterrows(), 1)
+        ]
+
         await asyncio.gather(*tasks)
         await browser.close()
+
 
 if __name__ == "__main__":
     asyncio.run(main())
