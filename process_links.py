@@ -25,76 +25,69 @@ def extract_id_from_url(url):
     return match.group(1) if match else "unknown"
 
 async def is_actually_dead(page, url, seq_num):
-    """
-    FIXED: If we see signs of life (fletch or ad containers), 
-    we ignore the 'death' markers entirely.
-    """
-    # Signs of a working ad
-    fletch = page.locator("fletch-renderer").first
-    ad_box = page.locator(".creative-container").first
-    
-    # If the ad content is starting to exist, it's NOT dead
-    if await fletch.count() > 0 or await ad_box.is_visible():
+    # If fletch exists anywhere, it's alive.
+    if await page.locator("fletch-renderer").count() > 0:
         return False
 
     empty = page.locator(".empty-results").first
     policy = page.locator(".policy-violation-banner").first
     
-    # If we see these, wait 5s to ensure they aren't just skeletons
     if await empty.is_visible() or await policy.is_visible():
-        await asyncio.sleep(5.0)
-        
-        # Final check: is the 'hidden' class absent?
-        # We only skip if the element is visible AND NOT inside a hidden div
-        if await empty.is_visible():
+        await asyncio.sleep(3.0)
+        # Check if they are truly visible and not just in the DOM background
+        if await empty.is_visible() and await empty.is_enabled():
             is_hidden = await page.evaluate("(el) => !!el.closest('.hidden')", await empty.element_handle())
-            if not is_hidden:
-                log(f"   ⚠️ [Seq: {seq_num}] SKIPPED: Truly Empty | {url}")
-                return True
-        
-        if await policy.is_visible():
+            if not is_hidden: return True
+        if await policy.is_visible() and await policy.is_enabled():
             is_hidden = await page.evaluate("(el) => !!el.closest('.hidden')", await policy.element_handle())
-            if not is_hidden:
-                log(f"   ⚠️ [Seq: {seq_num}] SKIPPED: Policy Violation | {url}")
-                return True
-            
+            if not is_hidden: return True
     return False
 
 async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
     indicator = page.locator(".variation-index-indicator").first
     has_variations = await indicator.is_visible()
     
-    # Updated locators to prioritize the fletch-renderer you found
+    # NEW: Use CSS selectors that pierce deeper and look for the ad frame
     locators = [
-        "fletch-renderer iframe",      
+        "fletch-renderer iframe", 
+        "div.creative-container iframe",
+        "html-renderer img",
+        ".creative-sub-container:not(.hidden) creative",
         "fletch-renderer",
-        "html-renderer img",           
-        "html-renderer",               
-        "iframe[src*='sadbundle']",    
-        ".creative-sub-container:not(.hidden)", 
-        ".creative-container"
+        ".ad-container"
     ]
     
     target = None
-    # Increased retry loop for Fletch ads to build
-    for _ in range(7): 
+    # Google's fletch can be slow to 'attach' the iframe
+    for _ in range(10): 
         for selector in locators:
             loc = page.locator(selector).first
-            if await loc.is_visible():
-                target = loc
-                break
+            if await loc.count() > 0:
+                # Check if it has height/width
+                box = await loc.bounding_box()
+                if box and box['width'] > 10 and box['height'] > 10:
+                    target = loc
+                    break
         if target: break
         await asyncio.sleep(2)
 
     if not target:
-        log(f"   ❌ [Seq: {seq_num}] ERROR: Target missing in DOM | {url}")
-        return "broken"
+        # LAST RESORT: Try to find any iframe inside the ad area
+        target = page.locator(".ad-container iframe").first
+        if await target.count() == 0:
+            log(f"   ❌ [Seq: {seq_num}] ERROR: DOM empty or hidden | {url}")
+            return "broken"
 
     if not has_variations:
         file_path = os.path.join(advertiser_dir, f"{ad_id}.png")
-        await asyncio.sleep(8.0) # Longer buffer for Fletch script execution
-        await target.screenshot(path=file_path)
-        log(f"   ✅ [Seq: {seq_num}] SAVED: {ad_id}.png | {url}")
+        await asyncio.sleep(8.0) 
+        try:
+            await target.screenshot(path=file_path)
+            log(f"   ✅ [Seq: {seq_num}] SAVED: {ad_id}.png | {url}")
+        except Exception as e:
+            # Fallback to full page element if target fails
+            await page.locator(".ad-container").first.screenshot(path=file_path)
+            log(f"   ✅ [Seq: {seq_num}] SAVED (Fallback): {ad_id}.png | {url}")
     else:
         text = await indicator.inner_text()
         match = re.search(r"of (\d+)", text)
@@ -104,7 +97,7 @@ async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
         for i in range(1, total_vars + 1):
             current_target = page.locator(".creative-sub-container:not(.hidden)").first
             v_path = os.path.join(advertiser_dir, f"{ad_id}_{i}.png")
-            await asyncio.sleep(5.5) 
+            await asyncio.sleep(6.0) 
             await current_target.screenshot(path=v_path)
             log(f"   📸 [Seq: {seq_num}] SAVED VAR {i}/{total_vars}: {ad_id}_{i}.png | {url}")
             
@@ -126,14 +119,10 @@ async def process_link(context, row, seq_num, sem):
         page = await context.new_page()
         try:
             log(f"🚀 [Seq: {seq_num}] STARTING: {ad_id} | {url}")
-            # Ensure domcontentloaded to handle trackers
             await page.goto(url, wait_until="domcontentloaded", timeout=GTC_TIMEOUT)
             
-            # Use the existence of fletch as a 'life' signal
-            try:
-                await page.wait_for_selector(".ad-container, fletch-renderer", timeout=20000)
-            except:
-                pass
+            # Wait for the structural ad container
+            await page.wait_for_selector(".ad-container", timeout=25000)
 
             if not await is_actually_dead(page, url, seq_num):
                 await handle_google_variations(page, advertiser_dir, ad_id, seq_num, url)
@@ -158,7 +147,6 @@ async def main():
         if mask.any():
             priority_row = df[mask]
             df = pd.concat([priority_row, df[~mask]], ignore_index=True)
-            log(f"🎯 Shard 0: Forcing {target_id} to the top.")
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
