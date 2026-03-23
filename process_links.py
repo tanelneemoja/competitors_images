@@ -38,53 +38,57 @@ async def process_link(context, row, seq_num, total, semaphore):
         try:
             log(f"🔍 [Seq: {seq_num}] Target ID: {ad_id}")
             
-            # Use 'networkidle' to ensure Meta's JS error messages finish loading
+            # 1. LOAD & WAIT
             await page.goto(url, wait_until="networkidle", timeout=GTC_TIMEOUT)
+            await asyncio.sleep(1.5) # Give Meta a moment to flip to the 'Unavailable' state
+
+            # 2. THE RIGID CONTENT CHECK
+            # We check the actual visible text of the body tag
+            body_text = await page.inner_text("body")
             
-            # --- 1. THE RIGID DEATH CHECK ---
-            # We pull the entire text content of the body to catch hidden errors
-            page_content = await page.content()
-            
-            unavailable_markers = [
+            # Specific strings that indicate the ad is gone
+            is_unavailable = any(x in body_text for x in [
                 "This content isn't available right now",
                 "it's been deleted",
                 "changed who can see it",
                 "isn't available"
-            ]
-            
-            if any(marker in page_content for marker in unavailable_markers):
-                log(f"   ⏩ [Seq: {seq_num}] SKIPPED: Ad is confirmed unavailable/deleted.")
+            ])
+
+            if is_unavailable:
+                log(f"   ⏩ [Seq: {seq_num}] SKIPPED: Ad is confirmed DEAD/UNAVAILABLE. ID: {ad_id}")
                 stats["broken"] += 1
                 return
 
-            # --- 2. TARGETING LOGIC ---
-            # Try Meta Card ID first, then Google href, then generic container
+            # 3. TARGETING LOGIC
+            # If the ad is live, we look for the Library ID inside the card
             meta_id_locator = page.locator(f"div:has-text('Library ID: {ad_id}')").locator("xpath=ancestor::div[contains(@class, '_8n-a')]").first
             gtc_href_locator = page.locator(f"a[href*='{ad_id}']").first
-            generic_meta = page.locator('[data-testid="ad-library-dynamic-content-container"]').first
-
+            
             target_element = None
             if await meta_id_locator.count() > 0:
                 target_element = meta_id_locator
             elif await gtc_href_locator.count() > 0:
                 target_element = gtc_href_locator
-            elif await generic_meta.is_visible():
-                target_element = generic_meta
 
             if not target_element:
-                reason = "No ad container found (Page loaded but ID missing)"
+                reason = "Valid ad container not found on live page"
                 log(f"   ⚠️ [Seq: {seq_num}] FAIL: {reason}")
                 audit_log.append({"seq": seq_num, "id": ad_id, "reason": reason, "url": url})
                 stats["failed"] += 1
                 return
 
-            # --- 3. CAPTURE LOGIC ---
+            # 4. CAPTURE & LOG PREVIEW
             file_name = f"{ad_id}.png"
             file_path = os.path.join(advertiser_dir, file_name)
+            abs_path = os.path.abspath(file_path) # Get full path for the log
+            
             status = "REPLACED" if os.path.exists(file_path) else "ADDED"
             
             await target_element.screenshot(path=file_path)
+            
+            # NEW: Log shows exactly where it was saved so you can check it
             log(f"   📸 [Seq: {seq_num}] {status}: {file_name}")
+            log(f"      ↳ Saved to: {abs_path}")
             
             if status == "REPLACED": stats["replaced"] += 1
             else: stats["new"] += 1
@@ -98,12 +102,8 @@ async def process_link(context, row, seq_num, total, semaphore):
             await page.close()
 
 async def main():
-    if not os.path.exists(CSV_FILE):
-        print(f"Error: {CSV_FILE} not found.")
-        return
-
+    if not os.path.exists(CSV_FILE): return
     df = pd.read_csv(CSV_FILE)
-    total_tasks = len(df)
     
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
@@ -113,26 +113,21 @@ async def main():
         )
         
         semaphore = asyncio.Semaphore(CONCURRENCY_LIMIT)
-        tasks = [process_link(context, row, i, total_tasks, semaphore) for i, (_, row) in enumerate(df.iterrows(), 1)]
+        tasks = [process_link(context, row, i, len(df), semaphore) for i, (_, row) in enumerate(df.iterrows(), 1)]
         await asyncio.gather(*tasks)
         await browser.close()
 
     # --- FINAL AUDIT LOG ---
     print("\n" + "="*40)
-    print(f"SCRAPE FINISHED | TOTAL PROCESSED: {total_tasks}")
-    print("="*40)
     print(f"✅ NEW:      {stats['new']}")
     print(f"🔄 REPLACED: {stats['replaced']}")
-    print(f"⏩ BROKEN:   {stats['broken']} (Unavailable/Deleted)")
+    print(f"⏩ BROKEN:   {stats['broken']}")
     print(f"❌ FAILED:   {stats['failed']}")
     
     if audit_log:
         print("\n" + "!"*15 + " FAILURE AUDIT LIST " + "!"*15)
-        for entry in audit_log:
-            print(f"Row {entry['seq']} | ID: {entry['id']}")
-            print(f"Reason: {entry['reason']}")
-            print(f"URL: {entry['url']}")
-            print("-" * 30)
+        for f in audit_log:
+            print(f"Row {f['seq']} | ID: {f['id']} | {f['reason']}\nURL: {f['url']}\n" + "-"*30)
 
 if __name__ == "__main__":
     asyncio.run(main())
