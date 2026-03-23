@@ -12,7 +12,6 @@ CSV_FILE = "meta_google_ads_links(in).csv"
 BASE_DATA_DIR = "data"
 GTC_CONCURRENCY = 5
 GTC_TIMEOUT = 60000
-
 BAD_HASH = "f1813cb9"
 
 PROCESS_META = False
@@ -32,32 +31,40 @@ def extract_id_from_url(url):
     return match.group(1) if match else "unknown"
 
 
-# 🔥 FIX 1: Improved dead check
+# ---------------- SAFE DEAD CHECK ----------------
 async def is_actually_dead(page, url, seq_num):
-    iframe = page.locator("fletch-renderer iframe").first
+    iframe = page.locator("fletch-renderer iframe")
 
-    try:
-        await iframe.wait_for(state="attached", timeout=10000)
-    except:
-        pass
-
-    for _ in range(5):
+    if await iframe.count() > 0:
         try:
-            box = await iframe.bounding_box()
-            height_attr = await iframe.get_attribute("height")
-
-            if (
-                box
-                and box["width"] > 100
-                and box["height"] > 100
-            ) or (
-                height_attr and int(height_attr) > 100
-            ):
+            await iframe.first.wait_for(state="attached", timeout=5000)
+            box = await iframe.first.bounding_box()
+            if box and box["width"] > 30 and box["height"] > 30:
                 return False
         except:
             pass
 
-        await asyncio.sleep(2)
+    await asyncio.sleep(2)
+
+    if await iframe.count() > 0:
+        try:
+            box = await iframe.first.bounding_box()
+            if box and box["width"] > 30 and box["height"] > 30:
+                return False
+        except:
+            pass
+
+    empty = page.locator(".empty-results").first
+    if await empty.count() > 0 and await empty.is_visible():
+        text = (await empty.inner_text()).lower()
+
+        if "can't find ad" in text or "not found in your region" in text:
+            log(f"   ⚠️ [Seq: {seq_num}] SKIPPED: GEO / NOT FOUND | {url}")
+            return True
+
+        if "no ads" in text:
+            log(f"   ⚠️ [Seq: {seq_num}] SKIPPED: Truly Empty | {url}")
+            return True
 
     policy = page.locator(".policy-violation-banner").first
     if await policy.count() > 0 and await policy.is_visible():
@@ -66,27 +73,10 @@ async def is_actually_dead(page, url, seq_num):
             log(f"   ⚠️ [Seq: {seq_num}] SKIPPED: Policy Violation | {url}")
             return True
 
-    empty = page.locator(".empty-results").first
-    if await empty.count() > 0:
-        try:
-            if await empty.is_visible():
-                text = (await empty.inner_text()).lower()
-
-                if "can't find ad" in text or "not found in your region" in text:
-                    log(f"   ⚠️ [Seq: {seq_num}] SKIPPED: GEO / NOT FOUND | {url}")
-                    return True
-
-                if "no ads" in text:
-                    log(f"   ⚠️ [Seq: {seq_num}] SKIPPED: Truly Empty | {url}")
-                    return True
-        except:
-            pass
-
-    log(f"   ⚠️ [Seq: {seq_num}] UNCERTAIN → Treating as DEAD | {url}")
-    return True
+    return False
 
 
-# 🔥 FIX 2: Removed visibility requirement
+# ---------------- VARIATION HANDLER ----------------
 async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
     indicator = page.locator(".variation-index-indicator").first
     has_variations = await indicator.is_visible()
@@ -103,26 +93,34 @@ async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
     ]
 
     target = None
+
     for _ in range(5):
         for selector in locators:
             loc = page.locator(selector).first
-            if await loc.count() > 0:  # 🔥 FIX HERE
+
+            # ✅ FIX: DO NOT require visibility (this broke Seq 199/200)
+            if await loc.count() > 0:
                 target = loc
                 break
+
         if target:
             break
+
         await asyncio.sleep(2)
 
     if not target:
         log(f"   ❌ [Seq: {seq_num}] ERROR: Target missing in DOM | {url}")
         return "broken"
 
+    # ---------------- SINGLE CREATIVE ----------------
     if not has_variations:
         file_path = os.path.join(advertiser_dir, f"{ad_id}.png")
-        await asyncio.sleep(3.0)
+        await asyncio.sleep(2.5)
 
         box = await target.bounding_box()
-        if not box or box["height"] < 50:
+
+        # ✅ FIX: softer threshold (prevents false skips)
+        if not box or box["height"] < 20:
             log(f"   ⚠️ [Seq: {seq_num}] SKIPPED: Tiny/Invalid creative | {url}")
             return "broken"
 
@@ -137,10 +135,12 @@ async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
 
         log(f"   ✅ [Seq: {seq_num}] SAVED: {ad_id}.png | {url}")
 
+    # ---------------- VARIATIONS ----------------
     else:
         text = await indicator.inner_text()
         match = re.search(r"of (\d+)", text)
         total_vars = int(match.group(1)) if match else 1
+
         next_btn = page.locator(".variation-right-arrow").first
 
         for i in range(1, total_vars + 1):
@@ -153,7 +153,9 @@ async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
             await asyncio.sleep(2.0)
 
             box = await current_target.bounding_box()
-            if not box or box["height"] < 50:
+
+            # ✅ FIX: softer threshold
+            if not box or box["height"] < 20:
                 log(f"   ⚠️ [Seq: {seq_num}] SKIPPED VAR {i}: Tiny creative")
             else:
                 await current_target.screenshot(path=v_path)
@@ -170,9 +172,12 @@ async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
     return "success"
 
 
+# ---------------- PROCESS LINK ----------------
 async def process_link(context, row, seq_num, sem):
     url = str(row.get('creative_page_url', ''))
-    if "adstransparency.google.com" not in url:
+
+    # ✅ SAFE GUARD (prevents empty Seq logs like before)
+    if not url or "adstransparency.google.com" not in url:
         return
 
     async with sem:
@@ -182,8 +187,10 @@ async def process_link(context, row, seq_num, sem):
         os.makedirs(advertiser_dir, exist_ok=True)
 
         page = await context.new_page()
+
         try:
             log(f"🚀 [Seq: {seq_num}] STARTING: {ad_id} | {url}")
+
             await page.goto(url, wait_until="domcontentloaded", timeout=GTC_TIMEOUT)
 
             try:
@@ -196,10 +203,12 @@ async def process_link(context, row, seq_num, sem):
 
         except Exception as e:
             log(f"   ❌ [Seq: {seq_num}] FAIL: {str(e)[:100]} | {url}")
+
         finally:
             await page.close()
 
 
+# ---------------- MAIN ----------------
 async def main():
     if not os.path.exists(CSV_FILE):
         return
@@ -223,6 +232,7 @@ async def main():
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
+
         context = await browser.new_context(
             viewport={'width': 1280, 'height': 1400},
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
@@ -236,6 +246,7 @@ async def main():
         ]
 
         await asyncio.gather(*tasks)
+
         await browser.close()
 
 
