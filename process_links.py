@@ -16,8 +16,6 @@ BAD_HASH = "f1813cb9"
 
 PROCESS_META = False
 PROCESS_GOOGLE = True
-
-# Region to append to all creative URLs if not already present.
 REGION = "EE"
 
 def log(msg):
@@ -31,15 +29,13 @@ def extract_id_from_url(url):
     return match.group(1) if match else "unknown"
 
 def normalize_url(url):
-    """Append ?region=XX if not already present in the URL."""
     if "region=" not in url:
         sep = "&" if "?" in url else "?"
         url = f"{url}{sep}region={REGION}"
     return url
 
 async def is_actually_dead(page, url, seq_num):
-    """If fletch is present, it is NOT dead. Ignore the banners."""
-    if await page.locator("fletch-renderer").count() > 0:
+    if await page.locator("fletch-renderer, html-renderer").count() > 0:
         return False
 
     empty = page.locator(".empty-results").first
@@ -75,13 +71,14 @@ async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
     indicator = page.locator(".variation-index-indicator").first
     has_variations = await indicator.is_visible()
 
+    # Locator priority: html-renderer first to catch text-based ads
     locators = [
-        "html-renderer img",
-        "html-renderer",
-        "iframe[src*='sadbundle']",
+        "html-renderer", 
         "fletch-renderer",
+        "html-renderer img",
+        "iframe[src*='sadbundle']",
         "iframe[src*='googlesyndication.com']",
-        ".creative-sub-container:not(.hidden)",
+        ".creative-sub-container:not(.hidden) .creative-container",
         ".creative-container"
     ]
 
@@ -102,12 +99,12 @@ async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
 
     if not has_variations:
         declared_h = await get_container_declared_height(page)
-        if 0 < declared_h <= 5:
-            log(f"    ⏭️ [Seq: {seq_num}] SKIPPED: Stub variation (declared height={declared_h}px) | {url}")
+        if 0 < declared_h <= 2:
+            log(f"    ⏭️ [Seq: {seq_num}] SKIPPED: Stub variation (height={declared_h}px) | {url}")
             return "broken"
 
         file_path = os.path.join(advertiser_dir, f"{ad_id}.png")
-        await asyncio.sleep(7.0)
+        await asyncio.sleep(5.0) 
         await target.screenshot(path=file_path)
 
         if os.path.exists(file_path):
@@ -129,21 +126,15 @@ async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
 
         for i in range(1, total_vars + 1):
             declared_h = await get_container_declared_height(page)
-            if 0 < declared_h <= 5:
-                log(f"    ⏭️ [Seq: {seq_num}] SKIPPED VAR {i}/{total_vars}: stub (declared height={declared_h}px) | {url}")
-                if i < total_vars:
-                    btn_class = await next_btn.get_attribute("class") or ""
-                    if "is-disabled" not in btn_class:
-                        await next_btn.click()
-                        await asyncio.sleep(3.0)
-                continue
+            if 0 < declared_h <= 2:
+                log(f"    ⏭️ [Seq: {seq_num}] SKIPPED VAR {i}/{total_vars}: stub | {url}")
+            else:
+                current_target = page.locator(".creative-sub-container:not(.hidden)").first
+                v_path = os.path.join(advertiser_dir, f"{ad_id}_{i}.png")
 
-            current_target = page.locator(".creative-sub-container:not(.hidden)").first
-            v_path = os.path.join(advertiser_dir, f"{ad_id}_{i}.png")
-
-            await asyncio.sleep(5.0)
-            await current_target.screenshot(path=v_path)
-            log(f"    📸 [Seq: {seq_num}] SAVED VAR {i}/{total_vars}: {ad_id}_{i}.png | {url}")
+                await asyncio.sleep(4.0)
+                await current_target.screenshot(path=v_path)
+                log(f"    📸 [Seq: {seq_num}] SAVED VAR {i}/{total_vars}: {ad_id}_{i}.png | {url}")
 
             if i < total_vars:
                 btn_class = await next_btn.get_attribute("class") or ""
@@ -197,13 +188,19 @@ async def main():
     total_shards = int(os.environ.get("SHARD_COUNT", 1))
     shard_index = int(os.environ.get("SHARD_INDEX", 0))
 
-    # --- PRIORITY INJECTION ---
-    target_id = "CR14180549296201400321"
-    mask = df['creative_page_url'].str.contains(target_id, na=False)
-    if mask.any():
-        priority_row = df[mask]
-        df = pd.concat([priority_row, df[~mask]], ignore_index=True)
-        log(f"🎯 Priority Injection: {target_id} moved to the top.")
+    # --- UPDATED PRIORITY INJECTION (Multiple IDs) ---
+    target_ids = ["CR14180549296201400321", "CR14981377662579113985"]
+    
+    priority_rows = []
+    for tid in target_ids:
+        mask = df['creative_page_url'].str.contains(tid, na=False)
+        if mask.any():
+            priority_rows.append(df[mask])
+            df = df[~mask]
+    
+    if priority_rows:
+        df = pd.concat(priority_rows + [df], ignore_index=True)
+        log(f"🎯 Priority Injection: Moved {len(priority_rows)} target IDs to the top.")
 
     if total_shards > 1:
         shards = np.array_split(df, total_shards)
