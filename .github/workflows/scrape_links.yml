@@ -8,8 +8,14 @@ permissions:
   contents: write
 
 jobs:
-  process:
+  scrape:
+    name: Scrape Shard ${{ matrix.shard }}
     runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        shard: [0, 1, 2, 3]
+      fail-fast: false
+    
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -22,15 +28,44 @@ jobs:
 
       - name: Install Dependencies
         run: |
-          pip install playwright pandas httpx
+          pip install playwright pandas numpy
           playwright install --with-deps chromium
 
-      - name: Run Scraper
+      # We run the shards in parallel. Meta rows will be skipped by the script logic.
+      # Google rows will be processed at full speed.
+      - name: Run Scraper Shard
         env:
+          SHARD_COUNT: 4
+          SHARD_INDEX: ${{ matrix.shard }}
           PYTHONUNBUFFERED: "1"
-          # CHANGE TO "false" AFTER YOUR FIRST RUN
-          PURGE_DATA: "true" 
         run: python process_links.py
+
+      - name: Upload Shard Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ads-data-${{ matrix.shard }}
+          path: data/
+          retention-days: 1
+
+  commit_results:
+    name: Merge and Push to Repo
+    needs: scrape
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Download All Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: temp_data/
+          pattern: ads-data-*
+          merge-multiple: true
+
+      - name: Merge Folders
+        run: |
+          mkdir -p data
+          cp -rn temp_data/* data/ || true
 
       - name: Commit and Push
         run: |
@@ -38,8 +73,8 @@ jobs:
           git config --global user.email "actions@github.com"
           git add data/
           if [ -n "$(git status --porcelain data/)" ]; then
-            git commit -m "Sync: New Ad Images/Screenshots $(date +'%Y-%m-%d')"
+            git commit -m "Sync: Combined Ad Images $(date +'%Y-%m-%d')"
             git push
           else
-            echo "No new images."
+            echo "No new images found."
           fi
