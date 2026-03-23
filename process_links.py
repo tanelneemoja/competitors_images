@@ -34,30 +34,25 @@ async def is_actually_dead(page, url, seq_num):
     if await page.locator("fletch-renderer, iframe[src*='adframe']").count() > 0:
         return False
 
-    empty = page.locator(".empty-results").first
-    policy = page.locator(".policy-violation-banner").first
+   # --- TRUE EMPTY CHECK ---
+empty = page.locator(".empty-results").first
 
-    # Wait a moment to see if an ad pops in before we trust the 'empty' banner
-    if await empty.is_visible() or await policy.is_visible():
-        await asyncio.sleep(4.0)
-        
-        # Check again: did a fletch-renderer appear during the sleep?
-        if await page.locator("fletch-renderer").count() > 0:
-            return False
+if await empty.count() > 0 and await empty.is_visible():
+    text = (await empty.inner_text()).lower()
 
-    if await empty.count() > 0 and await empty.is_visible():
-        text = (await empty.inner_text()).lower()
-        if "can't find ad" in text or "not found in your region" in text or "no ads" in text:
-            log(f"   ⚠️ [Seq: {seq_num}] SKIPPED: GEO / NOT FOUND | {url}")
-            return True
+    # 🔥 ONLY treat as GEO if region text is explicitly present
+    if "not found in your region" in text:
+        log(f"   ⚠️ [Seq: {seq_num}] SKIPPED: GEO / NOT FOUND | {url}")
+        return True
 
-    if await policy.count() > 0 and await policy.is_visible():
-        text = (await policy.inner_text()).lower()
-        if "removed" in text or "violation" in text:
-            log(f"   ⚠️ [Seq: {seq_num}] SKIPPED: Policy Violation | {url}")
-            return True
+    # 🔥 Treat generic "Can't find ad" WITHOUT region text as BROKEN (not GEO)
+    if "can't find ad" in text:
+        log(f"   ⚠️ [Seq: {seq_num}] SKIPPED: BROKEN / UNKNOWN | {url}")
+        return True
 
-    return False
+    if "no ads" in text:
+        log(f"   ⚠️ [Seq: {seq_num}] SKIPPED: Truly Empty | {url}")
+        return True
 
 async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
     indicator = page.locator(".variation-index-indicator").first
