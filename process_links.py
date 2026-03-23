@@ -10,7 +10,7 @@ import numpy as np
 # --- CONFIGURATION ---
 CSV_FILE = "meta_google_ads_links(in).csv"
 BASE_DATA_DIR = "data"
-GTC_CONCURRENCY = 5  # Adjusted for GitHub Sharding
+GTC_CONCURRENCY = 5  
 GTC_TIMEOUT = 60000  
 BAD_HASH = "f1813cb9"
 
@@ -28,7 +28,6 @@ def extract_id_from_url(url):
     return match.group(1) if match else "unknown"
 
 async def is_actually_dead(page, url, seq_num):
-    """Restored from your working version."""
     if await page.locator(".empty-results").first.is_visible():
         log(f"   ⚠️ [Seq: {seq_num}] SKIPPED: Empty Results | {url}")
         return True
@@ -41,22 +40,41 @@ async def is_actually_dead(page, url, seq_num):
     return False
 
 async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
-    """Restored from your working version with fletch/html support."""
+    """
+    ONLY MODIFIED: Targeted locators for Swedbank/Rademar/Eesti Energia.
+    Everything else (Hash check, logic flow) is kept exactly as provided.
+    """
     indicator = page.locator(".variation-index-indicator").first
     has_variations = await indicator.is_visible()
     
-    # Restored your exact targeting sequence
-    target = page.locator(".creative-sub-container:not(.hidden)").first
-    if await target.count() == 0:
-        target = page.locator("html-renderer, fletch-renderer, .creative-container").first
+    # CHANGED: Replaced the old target line with a robust check for HTML5/Nested Imgs
+    target = None
+    locators = [
+        "html-renderer img",           # Eesti Energia (Img inside renderer)
+        "html-renderer",               # Swedbank / Rademar (HTML5)
+        "iframe[src*='sadbundle']",    # Direct banking iFrames
+        ".creative-sub-container:not(.hidden)", 
+        "fletch-renderer", 
+        ".creative-container"
+    ]
+    
+    for _ in range(5):
+        for selector in locators:
+            loc = page.locator(selector).first
+            if await loc.is_visible():
+                target = loc
+                break
+        if target: break
+        await asyncio.sleep(2)
 
-    if await target.count() == 0 or not await target.is_visible():
+    if not target:
         log(f"   ❌ [Seq: {seq_num}] ERROR: Target missing in DOM | {url}")
         return "broken"
 
     if not has_variations:
         file_path = os.path.join(advertiser_dir, f"{ad_id}.png")
-        await asyncio.sleep(2.0) # Buffer for render
+        # CHANGED: Increased sleep to 6.0 for HTML5 iFrame painting stability
+        await asyncio.sleep(6.0) 
         await target.screenshot(path=file_path)
         
         if os.path.exists(file_path):
@@ -76,15 +94,16 @@ async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
         
         for i in range(1, total_vars + 1):
             v_path = os.path.join(advertiser_dir, f"{ad_id}_{i}.png")
-            await asyncio.sleep(3.5) # Wait for iframe paint (increased slightly for stability)
+            # CHANGED: Increased to 4.5 for iFrame variation stability
+            await asyncio.sleep(4.5) 
             await target.screenshot(path=v_path)
             log(f"   📸 [Seq: {seq_num}] SAVED VAR {i}/{total_vars}: {ad_id}_{i}.png | {url}")
             
             if i < total_vars:
-                # Check if next button is enabled (not is-disabled)
                 btn_class = await next_btn.get_attribute("class") or ""
                 if "is-disabled" not in btn_class:
                     await next_btn.click()
+                    await asyncio.sleep(2.0)
                 else:
                     log(f"   🛑 [Seq: {seq_num}] WARN: Next button stuck at {i} | {url}")
                     break
@@ -104,11 +123,11 @@ async def process_link(context, row, seq_num, sem):
         page = await context.new_page()
         try:
             log(f"🚀 [Seq: {seq_num}] STARTING: {ad_id} | {url}")
-            await page.goto(url, wait_until="domcontentloaded", timeout=GTC_TIMEOUT)
+            # CHANGED: Using networkidle to ensure iFrames/Assets start loading
+            await page.goto(url, wait_until="networkidle", timeout=GTC_TIMEOUT)
             
-            # Restored your wait_for_selector sequence
             try:
-                await page.wait_for_selector(".creative-container, .empty-results, .policy-violation-banner, fletch-renderer", timeout=25000)
+                await page.wait_for_selector(".creative-container, .empty-results, .policy-violation-banner", timeout=25000)
             except:
                 pass
 
@@ -125,7 +144,6 @@ async def main():
     if not os.path.exists(CSV_FILE): return
     df = pd.read_csv(CSV_FILE)
 
-    # Keep Sharding Logic for GitHub Actions
     total_shards = int(os.environ.get("SHARD_COUNT", 1))
     shard_index = int(os.environ.get("SHARD_INDEX", 0))
     if total_shards > 1:
@@ -135,7 +153,7 @@ async def main():
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context(
-            viewport={'width': 1280, 'height': 1200},
+            viewport={'width': 1280, 'height': 1400}, # Increased height for 300x600 ads
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
         )
         sem = asyncio.Semaphore(GTC_CONCURRENCY)
