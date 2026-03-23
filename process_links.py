@@ -6,12 +6,13 @@ from playwright.async_api import async_playwright
 from datetime import datetime
 import hashlib
 import numpy as np
+import random
 
 # --- CONFIGURATION ---
 CSV_FILE = "meta_google_ads_links(in).csv"
 BASE_DATA_DIR = "data"
-GTC_CONCURRENCY = 5  
-GTC_TIMEOUT = 60000  
+GTC_CONCURRENCY = 2  # Lowered concurrency to reduce bot detection
+GTC_TIMEOUT = 90000  # Increased to 90s
 BAD_HASH = "f1813cb9"
 
 def log(msg):
@@ -25,20 +26,20 @@ def extract_id_from_url(url):
     return match.group(1) if match else "unknown"
 
 async def is_actually_dead(page, url, seq_num):
-    # If fletch exists anywhere, it's alive.
-    if await page.locator("fletch-renderer").count() > 0:
+    # Life signals: fletch, creative, or any iframe inside the main content
+    if await page.locator("fletch-renderer, .creative-container, iframe[src*='adframe']").count() > 0:
         return False
 
     empty = page.locator(".empty-results").first
     policy = page.locator(".policy-violation-banner").first
     
     if await empty.is_visible() or await policy.is_visible():
-        await asyncio.sleep(3.0)
-        # Check if they are truly visible and not just in the DOM background
-        if await empty.is_visible() and await empty.is_enabled():
+        await asyncio.sleep(2.0)
+        # Check if they are truly blocking the view
+        if await empty.is_visible():
             is_hidden = await page.evaluate("(el) => !!el.closest('.hidden')", await empty.element_handle())
             if not is_hidden: return True
-        if await policy.is_visible() and await policy.is_enabled():
+        if await policy.is_visible():
             is_hidden = await page.evaluate("(el) => !!el.closest('.hidden')", await policy.element_handle())
             if not is_hidden: return True
     return False
@@ -47,47 +48,35 @@ async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
     indicator = page.locator(".variation-index-indicator").first
     has_variations = await indicator.is_visible()
     
-    # NEW: Use CSS selectors that pierce deeper and look for the ad frame
     locators = [
         "fletch-renderer iframe", 
         "div.creative-container iframe",
         "html-renderer img",
-        ".creative-sub-container:not(.hidden) creative",
         "fletch-renderer",
         ".ad-container"
     ]
     
     target = None
-    # Google's fletch can be slow to 'attach' the iframe
-    for _ in range(10): 
+    for _ in range(12): # 12 retries (24 seconds total)
         for selector in locators:
             loc = page.locator(selector).first
             if await loc.count() > 0:
-                # Check if it has height/width
                 box = await loc.bounding_box()
-                if box and box['width'] > 10 and box['height'] > 10:
+                if box and box['width'] > 5 and box['height'] > 5:
                     target = loc
                     break
         if target: break
         await asyncio.sleep(2)
 
     if not target:
-        # LAST RESORT: Try to find any iframe inside the ad area
-        target = page.locator(".ad-container iframe").first
-        if await target.count() == 0:
-            log(f"   ❌ [Seq: {seq_num}] ERROR: DOM empty or hidden | {url}")
-            return "broken"
+        log(f"   ❌ [Seq: {seq_num}] ERROR: Ad content never rendered | {url}")
+        return "broken"
 
     if not has_variations:
         file_path = os.path.join(advertiser_dir, f"{ad_id}.png")
-        await asyncio.sleep(8.0) 
-        try:
-            await target.screenshot(path=file_path)
-            log(f"   ✅ [Seq: {seq_num}] SAVED: {ad_id}.png | {url}")
-        except Exception as e:
-            # Fallback to full page element if target fails
-            await page.locator(".ad-container").first.screenshot(path=file_path)
-            log(f"   ✅ [Seq: {seq_num}] SAVED (Fallback): {ad_id}.png | {url}")
+        await asyncio.sleep(10.0) # Maximum patience for Fletch
+        await target.screenshot(path=file_path)
+        log(f"   ✅ [Seq: {seq_num}] SAVED: {ad_id}.png | {url}")
     else:
         text = await indicator.inner_text()
         match = re.search(r"of (\d+)", text)
@@ -97,13 +86,13 @@ async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
         for i in range(1, total_vars + 1):
             current_target = page.locator(".creative-sub-container:not(.hidden)").first
             v_path = os.path.join(advertiser_dir, f"{ad_id}_{i}.png")
-            await asyncio.sleep(6.0) 
+            await asyncio.sleep(7.0) 
             await current_target.screenshot(path=v_path)
             log(f"   📸 [Seq: {seq_num}] SAVED VAR {i}/{total_vars}: {ad_id}_{i}.png | {url}")
             
             if i < total_vars:
                 await next_btn.click()
-                await asyncio.sleep(3.0)
+                await asyncio.sleep(4.0)
     return "success"
 
 async def process_link(context, row, seq_num, sem):
@@ -119,15 +108,26 @@ async def process_link(context, row, seq_num, sem):
         page = await context.new_page()
         try:
             log(f"🚀 [Seq: {seq_num}] STARTING: {ad_id} | {url}")
-            await page.goto(url, wait_until="domcontentloaded", timeout=GTC_TIMEOUT)
             
-            # Wait for the structural ad container
-            await page.wait_for_selector(".ad-container", timeout=25000)
+            # 1. Load page
+            await page.goto(url, wait_until="networkidle", timeout=GTC_TIMEOUT)
+            
+            # 2. Mimic "Human" presence
+            await page.mouse.wheel(0, 500)
+            await asyncio.sleep(random.uniform(1.0, 3.0))
+            
+            # 3. Wait for structural container with longer timeout
+            try:
+                await page.wait_for_selector(".ad-container", timeout=45000)
+            except:
+                log(f"   🕒 [Seq: {seq_num}] Slow load warning: Proceeding anyway...")
 
+            # 4. Process
             if not await is_actually_dead(page, url, seq_num):
                 await handle_google_variations(page, advertiser_dir, ad_id, seq_num, url)
+                
         except Exception as e:
-            log(f"   ❌ [Seq: {seq_num}] FAIL: {str(e)[:50]} | {url}")
+            log(f"   ❌ [Seq: {seq_num}] FAIL: {str(e)[:60]} | {url}")
         finally:
             await page.close()
 
@@ -150,7 +150,11 @@ async def main():
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context(viewport={'width': 1280, 'height': 1400})
+        # Use a more realistic context
+        context = await browser.new_context(
+            viewport={'width': 1280, 'height': 1400},
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+        )
         sem = asyncio.Semaphore(GTC_CONCURRENCY)
         tasks = [process_link(context, row, i, sem) for i, (_, row) in enumerate(df.iterrows(), 1)]
         await asyncio.gather(*tasks)
