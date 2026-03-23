@@ -32,9 +32,6 @@ def extract_id_from_url(url):
 
 
 async def is_actually_dead(page, url, seq_num):
-    """
-    KEEP ORIGINAL LOGIC (baseline version)
-    """
     if await page.locator("fletch-renderer").count() > 0:
         return False
 
@@ -79,7 +76,6 @@ async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
         for selector in locators:
             loc = page.locator(selector).first
 
-            # 🔥 ONLY FIX: remove is_visible() dependency
             if await loc.count() > 0:
                 target = loc
                 break
@@ -95,11 +91,18 @@ async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
 
     if not has_variations:
         file_path = os.path.join(advertiser_dir, f"{ad_id}.png")
+
         await asyncio.sleep(7.0)
 
-        await target.wait_for(state="visible", timeout=15000)
-await asyncio.sleep(2.5)
-await target.screenshot(path=file_path)
+        # 🔥 FIX: render stabilization before screenshot
+        try:
+            await target.wait_for(state="visible", timeout=15000)
+        except:
+            pass
+
+        await asyncio.sleep(2.5)
+
+        await target.screenshot(path=file_path)
 
         if os.path.exists(file_path):
             with open(file_path, "rb") as f:
@@ -122,6 +125,15 @@ await target.screenshot(path=file_path)
             v_path = os.path.join(advertiser_dir, f"{ad_id}_{i}.png")
 
             await asyncio.sleep(5.0)
+
+            # 🔥 FIX ALSO APPLIED HERE (same issue)
+            try:
+                await current_target.wait_for(state="visible", timeout=15000)
+            except:
+                pass
+
+            await asyncio.sleep(2.5)
+
             await current_target.screenshot(path=v_path)
 
             log(f"   📸 [Seq: {seq_num}] SAVED VAR {i}/{total_vars}: {ad_id}_{i}.png | {url}")
