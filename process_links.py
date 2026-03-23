@@ -11,6 +11,8 @@ CSV_FILE = "meta_google_ads_links(in).csv"
 BASE_DATA_DIR = "data"
 CONCURRENCY_LIMIT = 2 
 GTC_TIMEOUT = 45000    
+# We know this hash is the 'Content Unavailable' screen
+BAD_HASH = "f1813cb9" 
 
 stats = {"new": 0, "replaced": 0, "broken": 0, "failed": 0}
 audit_log = []
@@ -39,32 +41,22 @@ async def process_link(context, row, seq_num, total, semaphore):
         try:
             log(f"🔍 [Seq: {seq_num}] Target ID: {ad_id}")
             
-            # 1. LOAD & WAIT FOR RENDER
+            # 1. LOAD & WAIT
             await page.goto(url, wait_until="networkidle", timeout=GTC_TIMEOUT)
-            await asyncio.sleep(2) # Necessary for Shadow DOM / Iframe error messages to pop in
+            await page.wait_for_timeout(3000) # Hard wait for Meta's late-loading error states
 
-            # 2. THE NUCLEAR DEATH CHECK (Triple Validation)
-            # A. Check raw HTML for the "not available" string
+            # 2. IMMEDIATE TEXT/BUTTON SCAN
             content = await page.content()
-            # B. Check for the unique "Go to Feed" button link that only exists on Error Pages
-            error_button = page.locator('a[aria-label="Go to Feed"]').first
-            # C. Check for the specific "This content isn't available" text
-            is_error_page = (
-                "This content isn't available right now" in content or 
-                "it's been deleted" in content or 
-                await error_button.is_visible()
-            )
-
-            if is_error_page:
-                log(f"   ⏩ [Seq: {seq_num}] SKIPPED: Confirmed Meta Error Page (Ad Dead).")
+            error_btn = page.locator('a[aria-label="Go to Feed"]').first
+            
+            if "This content isn't available" in content or await error_btn.is_visible():
+                log(f"   ⏩ [Seq: {seq_num}] SKIPPED: Ad dead (Text/Button Detection).")
                 stats["broken"] += 1
                 return
 
-            # 3. TARGETING THE REAL AD CONTAINER
-            # We look for the card that specifically mentions the ID in the "Library ID: XXX" span
-            card_selector = f"div:has-text('Library ID: {ad_id}')"
-            # We then go to the ancestor that represents the whole card
-            meta_card = page.locator(card_selector).locator("xpath=ancestor::div[contains(@class, '_8n-a')]").first
+            # 3. TARGETING
+            # Look for the Library ID specific card
+            meta_card = page.locator(f"div:has-text('Library ID: {ad_id}')").locator("xpath=ancestor::div[contains(@class, '_8n-a')]").first
             gtc_ad = page.locator(f"a[href*='{ad_id}']").first
 
             target = None
@@ -72,24 +64,29 @@ async def process_link(context, row, seq_num, total, semaphore):
                 target = meta_card
             elif await gtc_ad.count() > 0:
                 target = gtc_ad
+            else:
+                # If we can't find the specific card, but the page didn't show an error, 
+                # we fallback to the whole body to see what's actually there.
+                target = page.locator("body") 
 
-            if not target:
-                reason = "No valid ad container found (Page loaded but no ad card)."
-                log(f"   ⚠️ [Seq: {seq_num}] FAIL: {reason}")
-                audit_log.append({"seq": seq_num, "id": ad_id, "reason": reason, "url": url})
-                stats["failed"] += 1
-                return
-
-            # 4. CAPTURE & HASH LOGGING
+            # 4. CAPTURE & HASH VALIDATION
             file_name = f"{ad_id}.png"
             file_path = os.path.join(advertiser_dir, file_name)
-            status = "REPLACED" if os.path.exists(file_path) else "ADDED"
             
+            # Temporary save to check hash
             await target.screenshot(path=file_path)
             
             with open(file_path, "rb") as f:
                 img_hash = hashlib.md5(f.read()).hexdigest()[:8]
 
+            # THE HASH SHIELD: If it matches the known error hash, delete it.
+            if img_hash == BAD_HASH:
+                os.remove(file_path)
+                log(f"   ⏩ [Seq: {seq_num}] SKIPPED: Ad dead (Hash Detection {img_hash}).")
+                stats["broken"] += 1
+                return
+
+            status = "REPLACED" if os.path.exists(file_path) else "ADDED"
             log(f"   📸 [Seq: {seq_num}] {status}: {file_name} [Hash:{img_hash}]")
             log(f"      URL: {url}")
             
