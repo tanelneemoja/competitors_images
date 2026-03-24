@@ -67,7 +67,6 @@ async def get_container_declared_height(page):
 
 async def handle_meta_ad(page, advertiser_dir, ad_id, seq_num, url):
     try:
-        # Targeting common Meta Ad Library creative classes
         target = page.locator("img.xfn06ss, video.xat24cr, .x1ll56u3 img").first
         if await target.count() == 0:
             target = page.locator("div[role='button'] img").first 
@@ -83,6 +82,17 @@ async def handle_meta_ad(page, advertiser_dir, ad_id, seq_num, url):
 
 async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
     is_diag = (ad_id == DIAGNOSTIC_TARGET_ID)
+    
+    # --- NEW: VIDEO FORMAT SKIP LOGIC ---
+    # Looks for the property div containing "Format: Video"
+    format_locator = page.locator("div.property")
+    count = await format_locator.count()
+    for i in range(count):
+        text = await format_locator.nth(i).inner_text()
+        if "Format:" in text and "Video" in text:
+            log(f"    ⏭️ [Seq: {seq_num}] SKIPPED: Video Format Detected | {ad_id}")
+            return "skipped_video"
+
     indicator = page.locator(".variation-index-indicator").first
     has_variations = await indicator.is_visible()
 
@@ -102,7 +112,7 @@ async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
                 is_vis = await loc.is_visible()
                 box = await loc.bounding_box()
                 if is_vis or (box and box['width'] > 5 and box['height'] > 5):
-                    if is_diag: log(f"    🎯 [DIAGNOSTIC] Found target via {selector} (Vis={is_vis})")
+                    if is_diag: log(f"    🎯 [DIAGNOSTIC] Found target via {selector}")
                     target = loc
                     break
         if target: break
@@ -123,7 +133,6 @@ async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
         await target.screenshot(path=file_path)
         log(f"    ✅ [Seq: {seq_num}] GOOGLE SAVED: {ad_id}.png")
     else:
-        # Carousel logic
         text = await indicator.inner_text()
         total_vars = int(re.search(r"of (\d+)", text).group(1)) if "of" in text else 1
         next_btn = page.locator(".variation-right-arrow").first
@@ -171,7 +180,6 @@ async def main():
     if not os.path.exists(CSV_FILE): return
     df = pd.read_csv(CSV_FILE)
 
-    # Priority Injection
     target_ids = ["CR14180549296201400321", DIAGNOSTIC_TARGET_ID]
     priority = df[df['creative_page_url'].str.contains('|'.join(target_ids), na=False)]
     others = df[~df['creative_page_url'].str.contains('|'.join(target_ids), na=False)]
