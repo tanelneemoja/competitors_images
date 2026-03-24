@@ -25,85 +25,81 @@ def extract_id_from_url(url):
     return match.group(1) if match else "unknown"
 
 def normalize_url(url, target_region):
-    if "adstransparency.google.com" not in url:
-        return url
+    if "adstransparency.google.com" not in url: return url
     url = re.sub(r'([\?&])region=[^&]*', r'\1', url).rstrip('?&')
     sep = "&" if "?" in url else "?"
     return f"{url}{sep}region={target_region}"
 
-async def check_page_status(page, url, seq_num):
-    # Check for presence of ad content
+async def check_page_status(page):
+    # Presence check for any valid ad container
     if await page.locator("fletch-renderer, html-renderer, .html-container, .creative-si, .creative-carousel, iframe").count() > 0:
-        # Check for VISIBLE policy violation
+        # Only terminal if the violation banner is actually VISIBLE
         banner = page.locator(".policy-violation-banner").first
         if await banner.is_visible():
-            log(f"    🛑 [Seq: {seq_num}] TERMINAL: Policy Violation confirmed | {url}")
             return "terminal"
         return "alive"
     
+    # Check for "Not Found" message
     empty_results = page.locator(".empty-results").first
     if await empty_results.is_visible():
         text = (await empty_results.inner_text()).lower()
         if any(phrase in text for phrase in ["id was not found", "can't find ad"]):
-            log(f"    🛑 [Seq: {seq_num}] TERMINAL: Ad ID not found | {url}")
             return "terminal"
-        return "retry"
-
     return "retry"
 
-async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
-    # Detect Video Skip
+async def handle_google_variations(page, advertiser_dir, ad_id, seq_num):
+    # 1. Format Check (Video Skip)
     properties = page.locator("div.property")
     for i in range(await properties.count()):
         prop_text = await properties.nth(i).inner_text()
         if "Video" in prop_text:
-            log(f"    ⏭️ [Seq: {seq_num}] SKIPPED: Video detected | {url}")
             return "skipped"
 
-    # Detect if it's a carousel variation (Needs more wait)
-    is_carousel = await page.locator(".variation-index-indicator, .creative-carousel").count() > 0
-    if is_carousel:
-        await asyncio.sleep(2.0) # Extra time for carousel animation
+    # 2. Universal Settlement Wait
+    # We wait 4s for SI containers, iframes, and carousels to finish entry animations
+    await asyncio.sleep(4.0) 
 
-    # Expanded locators based on your "About You" HTML
+    # 3. Targeted Locators (Prioritizing the internal content of SI containers)
     locators = [
-        ".creative-sub-container-si creative", # Specific to About You Carousel
-        "html-renderer iframe", 
-        "creative.creative-si", 
-        ".creative-carousel .creative-container",
-        "html-renderer img",
-        ".html-container"
+        "html-renderer iframe",       # Best for Text/HTML5 bundles (Seq 9)
+        "html-renderer img",          # Standard Image ads
+        ".creative-container img",    # Fallback image
+        ".creative-sub-container-si", # The primary wrapper for About You ads
+        "creative.creative-si",       # The variation host
+        ".html-container"             # Final fallback
     ]
 
     target = None
-    for attempt in range(1, 6):
+    # 10 attempts to find a rendered element with valid dimensions
+    for attempt in range(10):
         for selector in locators:
             loc = page.locator(selector).first
             if await loc.count() > 0:
-                # Force visibility check
                 if await loc.is_hidden(): continue
                 
                 box = await loc.bounding_box()
-                if box and box['width'] > 5 and box['height'] > 5:
+                if box and box['width'] > 10 and box['height'] > 10:
                     target = loc
                     break
         if target: break
-        await asyncio.sleep(2)
+        await asyncio.sleep(1.0)
 
-    if not target:
-        log(f"    ❌ [Seq: {seq_num}] FAILED: No valid container found | {url}")
-        return "broken"
+    if not target: return "broken"
 
+    # 4. Final Stabilize
+    await asyncio.sleep(2.0)
     file_path = os.path.join(advertiser_dir, f"{ad_id}.png")
-    await asyncio.sleep(4.0) # Final settling time
     
     try:
         await target.screenshot(path=file_path)
-        log(f"    ✅ [Seq: {seq_num}] GOOGLE SAVED: {ad_id}.png | {url}")
         return "success"
-    except Exception as e:
-        log(f"    ❌ [Seq: {seq_num}] Screenshot Error: {str(e)[:30]}")
-        return "failed"
+    except Exception:
+        # Last ditch effort: snap the whole SI container if element-specific fails
+        try:
+            await page.locator(".creative-sub-container-si").first.screenshot(path=file_path)
+            return "success"
+        except:
+            return "failed"
 
 async def process_link(context, row, seq_num, sem):
     raw_url = str(row.get('creative_page_url', ''))
@@ -115,44 +111,54 @@ async def process_link(context, row, seq_num, sem):
     os.makedirs(advertiser_dir, exist_ok=True)
 
     async with sem:
+        # Log start of sequence
+        log(f"🚀 [Seq: {seq_num}] Probing {ad_id}")
+        
         regions = [DEFAULT_REGION] + FALLBACK_REGIONS if is_google else [None]
         
         for region in regions:
             url = normalize_url(raw_url, region) if is_google else raw_url
             page = await context.new_page()
             try:
-                log(f"🚀 [Seq: {seq_num}] PROBING ({region if region else 'Meta'}): {ad_id}")
                 await page.goto(url, wait_until="networkidle", timeout=GTC_TIMEOUT)
                 
                 if is_google:
-                    await asyncio.sleep(4.0) 
-                    status = await check_page_status(page, url, seq_num)
+                    await asyncio.sleep(3.0)
+                    status = await check_page_status(page)
                     
                     if status == "alive":
-                        result = await handle_google_variations(page, advertiser_dir, ad_id, seq_num, url)
-                        if result in ["success", "skipped"]:
-                            await page.close()
-                            return 
+                        res = await handle_google_variations(page, advertiser_dir, ad_id, seq_num)
+                        if res == "success":
+                            log(f"    ✅ [Seq: {seq_num}] SAVED: {ad_id}.png ({region})")
+                            await page.close(); return
+                        elif res == "skipped":
+                            log(f"    ⏭️ [Seq: {seq_num}] SKIPPED: Video Format ({region})")
+                            await page.close(); return
                     elif status == "terminal":
-                        await page.close()
-                        return 
+                        log(f"    🛑 [Seq: {seq_num}] TERMINAL: Policy/Not Found ({region})")
+                        await page.close(); return
                     
-                    log(f"    ℹ️ [Seq: {seq_num}] {region} empty/retry, trying next...")
+                    # If reach here, region failed; loop to next one silently
                 
                 elif is_meta:
                     await asyncio.sleep(5)
-                    # Reverting to your exact Meta selectors
                     meta_target = page.locator("img.xfn06ss, video.xat24cr, .x1ll56u3 img").first
                     if await meta_target.count() > 0:
                         await meta_target.screenshot(path=os.path.join(advertiser_dir, f"{ad_id}.png"))
-                        log(f"    ✅ [Seq: {seq_num}] META SAVED | {url}")
-                    await page.close()
-                    return
+                        log(f"    ✅ [Seq: {seq_num}] SAVED: {ad_id}.png (Meta)")
+                        await page.close(); return
+                    else:
+                        log(f"    ❌ [Seq: {seq_num}] FAILED: Meta selectors missing")
+                        await page.close(); return
 
-            except Exception as e:
-                log(f"    ❌ [Seq: {seq_num}] Error on {region}: {str(e)[:40]}")
+            except Exception:
+                pass 
             finally:
                 await page.close()
+        
+        # Only log one exhausted message if ALL regions failed
+        if is_google:
+            log(f"    ⚠️ [Seq: {seq_num}] EXHAUSTED: All regions failed for {ad_id}")
 
 async def main():
     if not os.path.exists(CSV_FILE): return
