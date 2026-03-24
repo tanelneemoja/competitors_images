@@ -32,9 +32,8 @@ def normalize_url(url, target_region):
     return f"{url}{sep}region={target_region}"
 
 async def check_page_status(page, url, seq_num):
-    # 1. SUCCESS Indicators (Including Carousel)
-    if await page.locator("fletch-renderer, html-renderer, .html-container, creative-preview, .creative-grid, .creative-si, .creative-carousel").count() > 0:
-        # FIX: Only terminate if the violation banner is VISIBLE on screen
+    # 1. SUCCESS Indicators (Added iframe support)
+    if await page.locator("fletch-renderer, html-renderer, .html-container, creative-preview, .creative-grid, .creative-si, .creative-carousel, iframe").count() > 0:
         banner = page.locator(".policy-violation-banner").first
         if await banner.is_visible():
             log(f"    🛑 [Seq: {seq_num}] TERMINAL: Policy Violation confirmed | {url}")
@@ -53,7 +52,7 @@ async def check_page_status(page, url, seq_num):
     return "retry"
 
 async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
-    # --- VIDEO SKIPPING RESTORED ---
+    # --- VIDEO SKIPPING (Kept per your instructions) ---
     format_locator = page.locator("div.property")
     for i in range(await format_locator.count()):
         text = await format_locator.nth(i).inner_text()
@@ -61,7 +60,9 @@ async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
             log(f"    ⏭️ [Seq: {seq_num}] SKIPPED: Video Format detected | {url}")
             return "skipped"
 
+    # Priority Locators updated to include IFRAME and specific SI containers
     locators = [
+        "html-renderer iframe",             # Target the iframe directly
         "creative.creative-si", 
         ".creative-carousel .creative-container",
         ".html-container", 
@@ -86,7 +87,8 @@ async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
         return "broken"
 
     file_path = os.path.join(advertiser_dir, f"{ad_id}.png")
-    await asyncio.sleep(5.0) 
+    # HTML5/Iframe ads need extra time to load internal scripts
+    await asyncio.sleep(6.0) 
     
     try:
         await target.screenshot(path=file_path)
@@ -121,23 +123,22 @@ async def process_link(context, row, seq_num, sem):
                 await page.goto(url, wait_until="networkidle", timeout=GTC_TIMEOUT)
                 
                 if is_google:
-                    await asyncio.sleep(3.0) 
+                    await asyncio.sleep(4.0) # Slightly more wait for Iframe ads
                     status = await check_page_status(page, url, seq_num)
                     
                     if status == "alive":
                         result = await handle_google_variations(page, advertiser_dir, ad_id, seq_num, url)
                         if result in ["success", "skipped"]:
                             await page.close()
-                            return # Move to next record
+                            return 
                     elif status == "terminal":
                         await page.close()
-                        return # Stop this record (ID doesn't exist)
+                        return 
                     
                     log(f"    ℹ️ [Seq: {seq_num}] {region} empty/retry, trying next...")
                 
                 elif is_meta:
                     await asyncio.sleep(5)
-                    # REVERTED TO PREVIOUS META SELECTORS
                     meta_target = page.locator("img.xfn06ss, video.xat24cr, .x1ll56u3 img").first
                     if await meta_target.count() > 0:
                         await meta_target.screenshot(path=os.path.join(advertiser_dir, f"{ad_id}.png"))
