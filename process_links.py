@@ -32,17 +32,15 @@ def normalize_url(url, target_region):
     return f"{url}{sep}region={target_region}"
 
 async def check_page_status(page, url, seq_num):
-    # SUCCESS: Look for any valid ad container or iframe
+    # Check for presence of ad content
     if await page.locator("fletch-renderer, html-renderer, .html-container, .creative-si, .creative-carousel, iframe").count() > 0:
-        # CRITICAL FIX: Only terminate if the violation banner is VISIBLE.
-        # This prevents valid videos/carousels from being killed by hidden code.
+        # Check for VISIBLE policy violation
         banner = page.locator(".policy-violation-banner").first
         if await banner.is_visible():
-            log(f"    🛑 [Seq: {seq_num}] TERMINAL: Policy Violation visible | {url}")
+            log(f"    🛑 [Seq: {seq_num}] TERMINAL: Policy Violation confirmed | {url}")
             return "terminal"
         return "alive"
     
-    # TERMINAL: ID truly doesn't exist
     empty_results = page.locator(".empty-results").first
     if await empty_results.is_visible():
         text = (await empty_results.inner_text()).lower()
@@ -54,21 +52,27 @@ async def check_page_status(page, url, seq_num):
     return "retry"
 
 async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
-    # --- VIDEO SKIPPING ---
-    format_locator = page.locator("div.property")
-    for i in range(await format_locator.count()):
-        if "Video" in (await format_locator.nth(i).inner_text()):
-            log(f"    ⏭️ [Seq: {seq_num}] SKIPPED: Video Format | {url}")
+    # Detect Video Skip
+    properties = page.locator("div.property")
+    for i in range(await properties.count()):
+        prop_text = await properties.nth(i).inner_text()
+        if "Video" in prop_text:
+            log(f"    ⏭️ [Seq: {seq_num}] SKIPPED: Video detected | {url}")
             return "skipped"
 
-    # Locators updated for Carousel and SI variations
+    # Detect if it's a carousel variation (Needs more wait)
+    is_carousel = await page.locator(".variation-index-indicator, .creative-carousel").count() > 0
+    if is_carousel:
+        await asyncio.sleep(2.0) # Extra time for carousel animation
+
+    # Expanded locators based on your "About You" HTML
     locators = [
+        ".creative-sub-container-si creative", # Specific to About You Carousel
         "html-renderer iframe", 
         "creative.creative-si", 
-        ".creative-sub-container-si creative",
         ".creative-carousel .creative-container",
-        ".html-container", 
-        "html-renderer img"
+        "html-renderer img",
+        ".html-container"
     ]
 
     target = None
@@ -76,8 +80,11 @@ async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
         for selector in locators:
             loc = page.locator(selector).first
             if await loc.count() > 0:
+                # Force visibility check
+                if await loc.is_hidden(): continue
+                
                 box = await loc.bounding_box()
-                if box and box['width'] > 10 and box['height'] > 10:
+                if box and box['width'] > 5 and box['height'] > 5:
                     target = loc
                     break
         if target: break
@@ -88,7 +95,7 @@ async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
         return "broken"
 
     file_path = os.path.join(advertiser_dir, f"{ad_id}.png")
-    await asyncio.sleep(5.0) 
+    await asyncio.sleep(4.0) # Final settling time
     
     try:
         await target.screenshot(path=file_path)
@@ -130,16 +137,15 @@ async def process_link(context, row, seq_num, sem):
                         await page.close()
                         return 
                     
-                    log(f"    ℹ️ [Seq: {seq_num}] {region} unsuccessful, trying next...")
+                    log(f"    ℹ️ [Seq: {seq_num}] {region} empty/retry, trying next...")
                 
                 elif is_meta:
                     await asyncio.sleep(5)
+                    # Reverting to your exact Meta selectors
                     meta_target = page.locator("img.xfn06ss, video.xat24cr, .x1ll56u3 img").first
                     if await meta_target.count() > 0:
                         await meta_target.screenshot(path=os.path.join(advertiser_dir, f"{ad_id}.png"))
                         log(f"    ✅ [Seq: {seq_num}] META SAVED | {url}")
-                    else:
-                        log(f"    ❌ [Seq: {seq_num}] META FAILED: Selectors not found")
                     await page.close()
                     return
 
@@ -147,8 +153,6 @@ async def process_link(context, row, seq_num, sem):
                 log(f"    ❌ [Seq: {seq_num}] Error on {region}: {str(e)[:40]}")
             finally:
                 await page.close()
-        
-        log(f"    ⚠️ [Seq: {seq_num}] Exhausted all regions for {ad_id}")
 
 async def main():
     if not os.path.exists(CSV_FILE): return
