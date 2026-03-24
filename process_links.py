@@ -38,13 +38,14 @@ async def check_page_status(page):
         return "alive"
     return "retry"
 
-async def handle_google_variations(page, advertiser_dir, ad_id, seq_num):
+async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
     properties = page.locator("div.property")
     for i in range(await properties.count()):
         if "Video" in (await properties.nth(i).inner_text()):
             return "skipped"
 
-    await asyncio.sleep(5.0) 
+    # Wait for heavy iframe/renderer content to settle
+    await asyncio.sleep(10.0) 
 
     locators = [
         "html-renderer iframe", 
@@ -97,18 +98,18 @@ async def process_link(context, row, seq_num, gtc_sem, meta_sem):
                     await page.goto(url, wait_until="networkidle", timeout=GTC_TIMEOUT)
                     status = await check_page_status(page)
                     if status == "alive":
-                        res = await handle_google_variations(page, advertiser_dir, ad_id, seq_num)
+                        res = await handle_google_variations(page, advertiser_dir, ad_id, seq_num, url)
                         if res == "success":
-                            log(f"    ✅ [Seq: {seq_num}] SAVED: {ad_id}.png ({region})")
+                            log(f"    ✅ [Seq: {seq_num}] SAVED: {ad_id}.png ({region}) | {url}")
                             await page.close(); return
                         elif res == "skipped":
-                            log(f"    ⏭️ [Seq: {seq_num}] SKIPPED: Video Format")
+                            log(f"    ⏭️ [Seq: {seq_num}] SKIPPED: Video Format | {url}")
                             await page.close(); return
                     elif status == "terminal":
-                        log(f"    🛑 [Seq: {seq_num}] REGION EMPTY: {region}")
+                        log(f"    🛑 [Seq: {seq_num}] REGION EMPTY: {region} | {url}")
                 except: pass
                 finally: await page.close()
-            log(f"    ⚠️ [Seq: {seq_num}] EXHAUSTED: {ad_id}")
+            log(f"    ⚠️ [Seq: {seq_num}] EXHAUSTED: {ad_id} | {raw_url}")
 
     elif is_meta:
         async with meta_sem:
@@ -122,11 +123,11 @@ async def process_link(context, row, seq_num, gtc_sem, meta_sem):
                 meta_target = page.locator("div[role='article'], ._8n-a").first
                 if await meta_target.count() > 0:
                     await meta_target.screenshot(path=os.path.join(advertiser_dir, f"{ad_id}.png"))
-                    log(f"    📸 [Seq: {seq_num}] ADDED META: {ad_id}.png")
+                    log(f"    📸 [Seq: {seq_num}] ADDED META: {ad_id}.png | {raw_url}")
                 else:
-                    log(f"    ⏩ [Seq: {seq_num}] SKIPPED: Meta Ad dead/missing")
+                    log(f"    ⏩ [Seq: {seq_num}] SKIPPED: Meta Ad dead/missing | {raw_url}")
             except Exception as e:
-                log(f"    ❌ [Seq: {seq_num}] FAIL META: {str(e)[:50]}")
+                log(f"    ❌ [Seq: {seq_num}] FAIL META: {str(e)[:50]} | {raw_url}")
             finally:
                 await page.close()
 
