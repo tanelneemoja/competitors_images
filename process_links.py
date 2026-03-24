@@ -40,39 +40,36 @@ async def check_page_status(page):
     
     empty_results = page.locator(".empty-results").first
     if await empty_results.is_visible():
-        text = (await empty_results.inner_text()).lower()
-        if any(phrase in text for phrase in ["id was not found", "can't find ad"]):
-            return "terminal"
+        return "terminal"
     return "retry"
 
 async def handle_google_variations(page, advertiser_dir, ad_id, seq_num):
-    # 1. Format Check (Video Skip)
+    # 1. Video Check
     properties = page.locator("div.property")
     for i in range(await properties.count()):
-        prop_text = await properties.nth(i).inner_text()
-        if "Video" in prop_text:
+        if "Video" in (await properties.nth(i).inner_text()):
             return "skipped"
 
-    # 2. Universal Settlement Wait
-    await asyncio.sleep(4.0) 
+    # 2. Strong Settlement Wait for Seq 9/15 (HTML5 bundles & scales)
+    await asyncio.sleep(5.0) 
 
-    # 3. Targeted Locators (SI and Text Ad bundles)
+    # 3. Targeted Locators (Specific to the sandboxed iframes in your HTML)
     locators = [
-        "html-renderer iframe",
+        "html-renderer iframe",                             # Target for Seq 9
+        ".creative-sub-container:not(.hidden) html-renderer", # Target for Seq 15
+        ".creative-sub-container-si:not(.hidden) img",
         "html-renderer img",
-        ".creative-container img",
-        ".creative-sub-container-si",
         "creative.creative-si",
         ".html-container"
     ]
 
     target = None
-    for attempt in range(10):
+    for attempt in range(12): 
         for selector in locators:
             loc = page.locator(selector).first
             if await loc.count() > 0:
-                if await loc.is_hidden(): continue
                 box = await loc.bounding_box()
+                # Ensure the element is rendered with actual size
                 if box and box['width'] > 10 and box['height'] > 10:
                     target = loc
                     break
@@ -81,15 +78,17 @@ async def handle_google_variations(page, advertiser_dir, ad_id, seq_num):
 
     if not target: return "broken"
 
+    # Allow final rendering/scaling to finish
     await asyncio.sleep(2.0)
     file_path = os.path.join(advertiser_dir, f"{ad_id}.png")
     
     try:
         await target.screenshot(path=file_path)
         return "success"
-    except Exception:
+    except:
+        # Emergency backup: capture the main visible sub-container
         try:
-            await page.locator(".creative-sub-container-si").first.screenshot(path=file_path)
+            await page.locator(".creative-sub-container:not(.hidden)").first.screenshot(path=file_path)
             return "success"
         except:
             return "failed"
@@ -112,7 +111,6 @@ async def process_link(context, row, seq_num, gtc_sem, meta_sem):
                 page = await context.new_page()
                 try:
                     await page.goto(url, wait_until="networkidle", timeout=GTC_TIMEOUT)
-                    await asyncio.sleep(3.0)
                     status = await check_page_status(page)
                     
                     if status == "alive":
@@ -126,10 +124,8 @@ async def process_link(context, row, seq_num, gtc_sem, meta_sem):
                     elif status == "terminal":
                         log(f"    🛑 [Seq: {seq_num}] TERMINAL: Policy/Not Found ({region}) | {url}")
                         await page.close(); return
-                except Exception:
-                    pass 
-                finally:
-                    await page.close()
+                except: pass
+                finally: await page.close()
             log(f"    ⚠️ [Seq: {seq_num}] EXHAUSTED: All regions failed for {ad_id} | {raw_url}")
 
     elif is_meta:
@@ -137,12 +133,11 @@ async def process_link(context, row, seq_num, gtc_sem, meta_sem):
             log(f"🔍 [Seq: {seq_num}] START META: {ad_id}")
             page = await context.new_page()
             try:
-                # Reverting to your working Meta logic (domcontentloaded + article selector)
+                # Meta logic remains exactly as provided
                 await page.goto(raw_url, wait_until="domcontentloaded", timeout=GTC_TIMEOUT)
                 try:
                     await page.wait_for_selector("div[role='article'], ._8n-a", timeout=15000)
-                except:
-                    pass
+                except: pass
 
                 meta_target = page.locator("div[role='article'], ._8n-a").first
                 if await meta_target.count() > 0 and await meta_target.is_visible():
@@ -158,8 +153,6 @@ async def process_link(context, row, seq_num, gtc_sem, meta_sem):
 async def main():
     if not os.path.exists(CSV_FILE): return
     full_df = pd.read_csv(CSV_FILE)
-    
-    # Split for sharding
     total_shards = 6
     shard_index = int(os.environ.get("SHARD_INDEX", 0))
     df = np.array_split(full_df, total_shards)[shard_index]
@@ -169,11 +162,9 @@ async def main():
         context = await browser.new_context(viewport={'width': 1280, 'height': 1200})
         gtc_sem = asyncio.Semaphore(GTC_CONCURRENCY)
         meta_sem = asyncio.Semaphore(META_CONCURRENCY)
-        
         tasks = [process_link(context, row, i, gtc_sem, meta_sem) for i, (_, row) in enumerate(df.iterrows(), 1)]
         await asyncio.gather(*tasks)
         await browser.close()
-    
     log("🏁 SHARD PROCESSING COMPLETE.")
 
 if __name__ == "__main__":
