@@ -12,13 +12,11 @@ CSV_FILE = "meta_google_ads_links(in).csv"
 BASE_DATA_DIR = "data"
 GTC_CONCURRENCY = 5
 GTC_TIMEOUT = 60000
-BAD_HASH = "f1813cb9"
 
 PROCESS_META = True
 PROCESS_GOOGLE = True
 REGION = "EE"
 
-# Target for deep logs
 DIAGNOSTIC_TARGET_ID = "CR14981377662579113985"
 
 def log(msg):
@@ -38,98 +36,58 @@ def normalize_url(url):
     return url
 
 async def is_actually_dead(page, url, seq_num):
-    """If fletch/html is present, it is NOT dead. Ignore the banners."""
-    if await page.locator("fletch-renderer, html-renderer").count() > 0:
+    if await page.locator("fletch-renderer, html-renderer, .html-container").count() > 0:
         return False
-
     empty = page.locator(".empty-results").first
     policy = page.locator(".policy-violation-banner").first
-
     if await empty.is_visible() or await policy.is_visible():
         await asyncio.sleep(5.0)
-
     if await empty.is_visible():
-        text = (await empty.inner_text()).lower()
-        if "no ads" in text or "can't find" in text:
-            log(f"    ⚠️ [Seq: {seq_num}] SKIPPED: Truly Empty | {url}")
-            return True
-
+        log(f"    ⚠️ [Seq: {seq_num}] SKIPPED: Truly Empty | {url}")
+        return True
     if await policy.is_visible():
-        text = (await policy.inner_text()).lower()
-        if "removed" in text or "violation" in text:
-            log(f"    ⚠️ [Seq: {seq_num}] SKIPPED: Policy Violation | {url}")
-            return True
-
+        log(f"    ⚠️ [Seq: {seq_num}] SKIPPED: Policy Violation | {url}")
+        return True
     return False
-
-async def get_container_declared_height(page):
-    try:
-        return await page.eval_on_selector(
-            ".creative-sub-container:not(.hidden) .creative-container",
-            "el => { const h = el.style.height; return h ? parseInt(h) : 0; }"
-        )
-    except Exception:
-        return 0
-
-async def handle_meta_ad(page, advertiser_dir, ad_id, seq_num, url):
-    try:
-        target = page.locator("img.xfn06ss, video.xat24cr, .x1ll56u3 img").first
-        if await target.count() == 0:
-            target = page.locator("div[role='button'] img").first 
-
-        if await target.count() > 0:
-            file_path = os.path.join(advertiser_dir, f"{ad_id}.png")
-            await target.screenshot(path=file_path)
-            log(f"    ✅ [Seq: {seq_num}] META SAVED: {ad_id}.png | {url}")
-        else:
-            log(f"    ❌ [Seq: {seq_num}] META ERROR: No creative found | {url}")
-    except Exception as e:
-        log(f"    ❌ [Seq: {seq_num}] META FAIL: {str(e)[:50]} | {url}")
 
 async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
     is_diag = (ad_id == DIAGNOSTIC_TARGET_ID)
     
-    # 1. RENDER FAILURE CHECK
+    # 1. SKIP CHECKS (Video & Render Failure)
     render_failed = page.locator(".render-failed-container, .render-failed").first
     if await render_failed.count() > 0:
-        fail_text = await render_failed.inner_text()
-        if "unable to show you this variation" in fail_text.lower():
+        if "unable to show" in (await render_failed.inner_text()).lower():
             log(f"    ⏭️ [Seq: {seq_num}] SKIPPED: Render Failure | {url}")
             return "skipped"
 
-    # 2. VIDEO FORMAT SKIP CHECK
     format_locator = page.locator("div.property")
-    count = await format_locator.count()
-    for i in range(count):
+    for i in range(await format_locator.count()):
         text = await format_locator.nth(i).inner_text()
         if "Format:" in text and "Video" in text:
-            log(f"    ⏭️ [Seq: {seq_num}] SKIPPED: Video Format Detected | {url}")
+            log(f"    ⏭️ [Seq: {seq_num}] SKIPPED: Video Format | {url}")
             return "skipped"
 
     indicator = page.locator(".variation-index-indicator").first
     has_variations = await indicator.is_visible()
 
+    # 2. LOCATOR PROBING (Updated for .html-container)
     locators = [
+        ".html-container",
+        "html-renderer img", 
         "iframe[id*='fletch-render']", 
         "div[id*='fletch-render']",
-        "html-renderer img", 
         "fletch-renderer",
         "html-renderer",
-        ".creative-container",
-        "iframe[src*='sadbundle']"
+        ".creative-container"
     ]
 
     target = None
-    if is_diag: log(f"    🔍 [DIAGNOSTIC] Probing DOM for {ad_id}...")
-
     for attempt in range(1, 6):
         for selector in locators:
             loc = page.locator(selector).first
             if await loc.count() > 0:
-                is_vis = await loc.is_visible()
                 box = await loc.bounding_box()
-                if is_vis or (box and box['width'] > 5 and box['height'] > 5):
-                    if is_diag: log(f"    🎯 [DIAGNOSTIC] Found target via {selector}")
+                if await loc.is_visible() or (box and box['width'] > 5 and box['height'] > 5):
                     target = loc
                     break
         if target: break
@@ -139,45 +97,42 @@ async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
         log(f"    ❌ [Seq: {seq_num}] ERROR: Target missing | {url}")
         return "broken"
 
-    if not has_variations:
-        declared_h = await get_container_declared_height(page)
-        if 0 < declared_h <= 5:
-            log(f"    ⏭️ [Seq: {seq_num}] SKIPPED: Stub (height={declared_h}px) | {url}")
-            return "broken"
+    # 3. CAPTURE
+    file_path = os.path.join(advertiser_dir, f"{ad_id}.png")
+    await asyncio.sleep(6.0)
 
-        file_path = os.path.join(advertiser_dir, f"{ad_id}.png")
-        await asyncio.sleep(6.0)
-        try:
-            await target.screenshot(path=file_path)
-        except:
-            await page.locator(".creative-container").first.screenshot(path=file_path)
-            
-        log(f"    ✅ [Seq: {seq_num}] GOOGLE SAVED: {ad_id}.png | {url}")
-    else:
-        text = await indicator.inner_text()
-        total = int(re.search(r"of (\d+)", text).group(1)) if "of" in text else 1
-        next_btn = page.locator(".variation-right-arrow").first
-        for i in range(1, total + 1):
-            v_fail = page.locator(".creative-sub-container:not(.hidden) .render-failed").first
-            if await v_fail.count() > 0:
-                log(f"    ⏭️ [Seq: {seq_num}] SKIPPED VAR {i}/{total}: Render Failure | {url}")
-            else:
-                v_path = os.path.join(advertiser_dir, f"{ad_id}_{i}.png")
-                await asyncio.sleep(4.0)
-                await page.locator(".creative-sub-container:not(.hidden)").first.screenshot(path=v_path)
-                log(f"    📸 [Seq: {seq_num}] SAVED VAR {i}/{total}: {ad_id}_{i}.png | {url}")
-            
-            if i < total and "is-disabled" not in (await next_btn.get_attribute("class") or ""):
-                await next_btn.click()
-                await asyncio.sleep(3.0)
+    try:
+        if not has_variations:
+            try:
+                await target.screenshot(path=file_path)
+            except:
+                await page.locator(".creative-container").first.screenshot(path=file_path)
+            log(f"    ✅ [Seq: {seq_num}] GOOGLE SAVED: {ad_id}.png | {url}")
+        else:
+            text = await indicator.inner_text()
+            total = int(re.search(r"of (\d+)", text).group(1)) if "of" in text else 1
+            next_btn = page.locator(".variation-right-arrow").first
+            for i in range(1, total + 1):
+                v_fail = page.locator(".creative-sub-container:not(.hidden) .render-failed").first
+                if await v_fail.count() > 0:
+                    log(f"    ⏭️ [Seq: {seq_num}] SKIPPED VAR {i}/{total}: Render Failure | {url}")
+                else:
+                    v_path = os.path.join(advertiser_dir, f"{ad_id}_{i}.png")
+                    await asyncio.sleep(4.0)
+                    await page.locator(".creative-sub-container:not(.hidden)").first.screenshot(path=v_path)
+                    log(f"    📸 [Seq: {seq_num}] SAVED VAR {i}/{total}: {ad_id}_{i}.png | {url}")
+                
+                if i < total and "is-disabled" not in (await next_btn.get_attribute("class") or ""):
+                    await next_btn.click()
+                    await asyncio.sleep(3.0)
+    except Exception as e:
+        log(f"    ❌ [Seq: {seq_num}] Screenshot Failed: {str(e)[:50]} | {url}")
     return "success"
 
 async def process_link(context, row, seq_num, sem):
     url = normalize_url(str(row.get('creative_page_url', '')))
     is_google = "adstransparency.google.com" in url
     is_meta = "facebook.com/ads/library" in url
-
-    if (is_google and not PROCESS_GOOGLE) or (is_meta and not PROCESS_META): return
 
     async with sem:
         advertiser = sanitize_filename(row.get('advertiser_name', 'Unknown'))
@@ -191,17 +146,18 @@ async def process_link(context, row, seq_num, sem):
             await page.goto(url, wait_until="domcontentloaded", timeout=GTC_TIMEOUT)
 
             if is_google:
-                try:
-                    await page.wait_for_selector(".ad-container", timeout=20000)
-                except Exception:
-                    pass
-                await asyncio.sleep(3.0) # Angular hydration
+                try: await page.wait_for_selector(".ad-container", timeout=20000)
+                except: pass
+                await asyncio.sleep(3.0) 
 
                 if not await is_actually_dead(page, url, seq_num):
                     await handle_google_variations(page, advertiser_dir, ad_id, seq_num, url)
             elif is_meta:
                 await asyncio.sleep(5)
-                await handle_meta_ad(page, advertiser_dir, ad_id, seq_num, url)
+                target = page.locator("img.xfn06ss, video.xat24cr, .x1ll56u3 img").first
+                if await target.count() > 0:
+                    await target.screenshot(path=os.path.join(advertiser_dir, f"{ad_id}.png"))
+                    log(f"    ✅ [Seq: {seq_num}] META SAVED | {url}")
 
         except Exception as e:
             log(f"    ❌ [Seq: {seq_num}] FAIL: {str(e)[:100]} | {url}")
@@ -212,13 +168,12 @@ async def main():
     if not os.path.exists(CSV_FILE): return
     full_df = pd.read_csv(CSV_FILE)
 
-    # Sharding logic for 6 shards
     total_shards = 6
     shard_index = int(os.environ.get("SHARD_INDEX", 0))
     shards = np.array_split(full_df, total_shards)
     df = shards[shard_index]
     
-    log(f"📋 SHARD {shard_index+1}/{total_shards} | Processing {len(df)} rows")
+    log(f"📋 SHARD {shard_index+1}/6 | {len(df)} rows")
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
