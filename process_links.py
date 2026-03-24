@@ -1,6 +1,6 @@
 import os
 import asyncio
-import pd
+import pandas as pd
 import re
 from playwright.async_api import async_playwright
 from datetime import datetime
@@ -32,18 +32,13 @@ def normalize_url(url, target_region):
     return f"{url}{sep}region={target_region}"
 
 async def check_page_status(page):
-    # Only "Can't find ad" is a terminal state for a region.
     if await page.locator(".empty-results").first.is_visible():
         return "terminal"
-    
-    # If any ad container exists, we are good to go.
     if await page.locator("html-renderer, .creative-si, iframe, .ad-container").count() > 0:
         return "alive"
-    
     return "retry"
 
 async def handle_google_variations(page, advertiser_dir, ad_id, seq_num):
-    # Skip Videos
     properties = page.locator("div.property")
     for i in range(await properties.count()):
         if "Video" in (await properties.nth(i).inner_text()):
@@ -51,7 +46,6 @@ async def handle_google_variations(page, advertiser_dir, ad_id, seq_num):
 
     await asyncio.sleep(5.0) 
 
-    # Locators (Using the original hierarchy that worked)
     locators = [
         "html-renderer iframe", 
         ".creative-sub-container:not(.hidden) html-renderer", 
@@ -66,7 +60,6 @@ async def handle_google_variations(page, advertiser_dir, ad_id, seq_num):
             loc = page.locator(selector).first
             if await loc.count() > 0:
                 box = await loc.bounding_box()
-                # If it has size, it exists. No more .is_visible() gate.
                 if box and box['width'] > 10 and box['height'] > 10:
                     target = loc
                     break
@@ -103,7 +96,6 @@ async def process_link(context, row, seq_num, gtc_sem, meta_sem):
                 try:
                     await page.goto(url, wait_until="networkidle", timeout=GTC_TIMEOUT)
                     status = await check_page_status(page)
-                    
                     if status == "alive":
                         res = await handle_google_variations(page, advertiser_dir, ad_id, seq_num)
                         if res == "success":
