@@ -32,7 +32,7 @@ def normalize_url(url, target_region):
     return f"{url}{sep}region={target_region}"
 
 async def check_page_status(page, url, seq_num):
-    # 1. SUCCESS Indicators (Added iframe support)
+    # 1. SUCCESS Indicators (Including Iframe/Carousel/SI)
     if await page.locator("fletch-renderer, html-renderer, .html-container, creative-preview, .creative-grid, .creative-si, .creative-carousel, iframe").count() > 0:
         banner = page.locator(".policy-violation-banner").first
         if await banner.is_visible():
@@ -52,17 +52,17 @@ async def check_page_status(page, url, seq_num):
     return "retry"
 
 async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
-    # --- VIDEO SKIPPING (Kept per your instructions) ---
+    # VIDEO SKIPPING
     format_locator = page.locator("div.property")
     for i in range(await format_locator.count()):
         text = await format_locator.nth(i).inner_text()
         if "Video" in text:
-            log(f"    ⏭️ [Seq: {seq_num}] SKIPPED: Video Format detected | {url}")
+            log(f"    ⏭️ [Seq: {seq_num}] SKIPPED: Video Format | {url}")
             return "skipped"
 
-    # Priority Locators updated to include IFRAME and specific SI containers
+    # Priority Locators including Iframe for HTML5 bundles
     locators = [
-        "html-renderer iframe",             # Target the iframe directly
+        "html-renderer iframe", 
         "creative.creative-si", 
         ".creative-carousel .creative-container",
         ".html-container", 
@@ -72,7 +72,7 @@ async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
     ]
 
     target = None
-    for _ in range(5):
+    for attempt in range(1, 6):
         for selector in locators:
             loc = page.locator(selector).first
             if await loc.count() > 0:
@@ -84,23 +84,23 @@ async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
         await asyncio.sleep(2)
 
     if not target:
+        log(f"    ❌ [Seq: {seq_num}] ERROR: No capture target found after 10s | {url}")
         return "broken"
 
     file_path = os.path.join(advertiser_dir, f"{ad_id}.png")
-    # HTML5/Iframe ads need extra time to load internal scripts
-    await asyncio.sleep(6.0) 
+    await asyncio.sleep(6.0) # Wait for Iframe content to render
     
     try:
         await target.screenshot(path=file_path)
         log(f"    ✅ [Seq: {seq_num}] GOOGLE SAVED: {ad_id}.png | {url}")
         return "success"
-    except Exception:
+    except Exception as e:
         try:
             await page.locator(".creative-sub-container").first.screenshot(path=file_path)
             log(f"    📸 [Seq: {seq_num}] SAVED via Fallback | {url}")
             return "success"
-        except Exception as e:
-            log(f"    ❌ [Seq: {seq_num}] Screenshot Failed: {str(e)[:30]}")
+        except Exception as e2:
+            log(f"    ❌ [Seq: {seq_num}] Screenshot Failed: {str(e2)[:30]}")
             return "failed"
 
 async def process_link(context, row, seq_num, sem):
@@ -123,7 +123,7 @@ async def process_link(context, row, seq_num, sem):
                 await page.goto(url, wait_until="networkidle", timeout=GTC_TIMEOUT)
                 
                 if is_google:
-                    await asyncio.sleep(4.0) # Slightly more wait for Iframe ads
+                    await asyncio.sleep(4.0) 
                     status = await check_page_status(page, url, seq_num)
                     
                     if status == "alive":
@@ -131,11 +131,12 @@ async def process_link(context, row, seq_num, sem):
                         if result in ["success", "skipped"]:
                             await page.close()
                             return 
+                        # If result is "broken" or "failed", it naturally proceeds to try next region
                     elif status == "terminal":
                         await page.close()
                         return 
                     
-                    log(f"    ℹ️ [Seq: {seq_num}] {region} empty/retry, trying next...")
+                    log(f"    ℹ️ [Seq: {seq_num}] {region} empty/failed, trying next region...")
                 
                 elif is_meta:
                     await asyncio.sleep(5)
@@ -143,13 +144,17 @@ async def process_link(context, row, seq_num, sem):
                     if await meta_target.count() > 0:
                         await meta_target.screenshot(path=os.path.join(advertiser_dir, f"{ad_id}.png"))
                         log(f"    ✅ [Seq: {seq_num}] META SAVED | {url}")
+                    else:
+                        log(f"    ❌ [Seq: {seq_num}] META FAILED: Selectors not found | {url}")
                     await page.close()
                     return
 
             except Exception as e:
-                log(f"    ❌ [Seq: {seq_num}] Error: {str(e)[:40]}")
+                log(f"    ❌ [Seq: {seq_num}] Error on {region}: {str(e)[:40]}")
             finally:
                 await page.close()
+        
+        log(f"    ⚠️ [Seq: {seq_num}] FINISHED: Exhausted all regions without success for {ad_id}")
 
 async def main():
     if not os.path.exists(CSV_FILE): return
