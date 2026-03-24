@@ -1,6 +1,6 @@
 import os
 import asyncio
-import pandas as pd
+import pd
 import re
 from playwright.async_api import async_playwright
 from datetime import datetime
@@ -9,7 +9,7 @@ import numpy as np
 # --- CONFIGURATION ---
 CSV_FILE = "meta_google_ads_links(in).csv"
 BASE_DATA_DIR = "data"
-GTC_CONCURRENCY = 5
+GTC_CONCURRENCY = 10 
 META_CONCURRENCY = 15
 GTC_TIMEOUT = 60000
 DEFAULT_REGION = "EE"
@@ -32,49 +32,44 @@ def normalize_url(url, target_region):
     return f"{url}{sep}region={target_region}"
 
 async def check_page_status(page):
-    # Only kill the run if the SPECIFIC "Can't find ad" UI is visible
-    empty_results = page.locator(".empty-results").first
-    if await empty_results.is_visible():
+    # Only "Can't find ad" is a terminal state for a region.
+    if await page.locator(".empty-results").first.is_visible():
         return "terminal"
     
-    # If we see any of our target ad containers, it's alive. 
-    # Ignore hidden policy banners entirely.
+    # If any ad container exists, we are good to go.
     if await page.locator("html-renderer, .creative-si, iframe, .ad-container").count() > 0:
         return "alive"
     
     return "retry"
 
 async def handle_google_variations(page, advertiser_dir, ad_id, seq_num):
-    # 1. Skip Videos
+    # Skip Videos
     properties = page.locator("div.property")
     for i in range(await properties.count()):
         if "Video" in (await properties.nth(i).inner_text()):
             return "skipped"
 
-    # 2. Render Wait (Crucial for iframes in Seq 9/11)
     await asyncio.sleep(5.0) 
 
-    # 3. Locators prioritized by what we've seen in your HTML
+    # Locators (Using the original hierarchy that worked)
     locators = [
-        "html-renderer iframe",                             # Seq 9 & 11
-        ".creative-sub-container:not(.hidden) html-renderer", # Seq 15
-        ".creative-sub-container-si:not(.hidden) img",
+        "html-renderer iframe", 
+        ".creative-sub-container:not(.hidden) html-renderer", 
         "html-renderer img",
-        "creative.creative-si",
+        ".creative-sub-container-si:not(.hidden)",
         ".html-container"
     ]
 
     target = None
-    for attempt in range(12): 
+    for attempt in range(15): 
         for selector in locators:
             loc = page.locator(selector).first
             if await loc.count() > 0:
                 box = await loc.bounding_box()
-                # Ensure it has physical size and is actually visible to the user
+                # If it has size, it exists. No more .is_visible() gate.
                 if box and box['width'] > 10 and box['height'] > 10:
-                    if await loc.is_visible():
-                        target = loc
-                        break
+                    target = loc
+                    break
         if target: break
         await asyncio.sleep(1.0)
 
@@ -112,16 +107,16 @@ async def process_link(context, row, seq_num, gtc_sem, meta_sem):
                     if status == "alive":
                         res = await handle_google_variations(page, advertiser_dir, ad_id, seq_num)
                         if res == "success":
-                            log(f"    ✅ [Seq: {seq_num}] SAVED: {ad_id}.png ({region}) | {url}")
+                            log(f"    ✅ [Seq: {seq_num}] SAVED: {ad_id}.png ({region})")
                             await page.close(); return
                         elif res == "skipped":
-                            log(f"    ⏭️ [Seq: {seq_num}] SKIPPED: Video Format ({region}) | {url}")
+                            log(f"    ⏭️ [Seq: {seq_num}] SKIPPED: Video Format")
                             await page.close(); return
                     elif status == "terminal":
-                        log(f"    🛑 [Seq: {seq_num}] REGION EMPTY: {region} | {url}")
+                        log(f"    🛑 [Seq: {seq_num}] REGION EMPTY: {region}")
                 except: pass
                 finally: await page.close()
-            log(f"    ⚠️ [Seq: {seq_num}] EXHAUSTED: All regions failed for {ad_id} | {raw_url}")
+            log(f"    ⚠️ [Seq: {seq_num}] EXHAUSTED: {ad_id}")
 
     elif is_meta:
         async with meta_sem:
@@ -133,13 +128,13 @@ async def process_link(context, row, seq_num, gtc_sem, meta_sem):
                     await page.wait_for_selector("div[role='article'], ._8n-a", timeout=15000)
                 except: pass
                 meta_target = page.locator("div[role='article'], ._8n-a").first
-                if await meta_target.count() > 0 and await meta_target.is_visible():
+                if await meta_target.count() > 0:
                     await meta_target.screenshot(path=os.path.join(advertiser_dir, f"{ad_id}.png"))
-                    log(f"    📸 [Seq: {seq_num}] ADDED META: {ad_id}.png | {raw_url}")
+                    log(f"    📸 [Seq: {seq_num}] ADDED META: {ad_id}.png")
                 else:
-                    log(f"    ⏩ [Seq: {seq_num}] SKIPPED: Meta Ad dead/missing | {raw_url}")
+                    log(f"    ⏩ [Seq: {seq_num}] SKIPPED: Meta Ad dead/missing")
             except Exception as e:
-                log(f"    ❌ [Seq: {seq_num}] FAIL META: {str(e)[:50]} | {raw_url}")
+                log(f"    ❌ [Seq: {seq_num}] FAIL META: {str(e)[:50]}")
             finally:
                 await page.close()
 
