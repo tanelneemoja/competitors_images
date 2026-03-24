@@ -39,20 +39,22 @@ async def check_page_status(page):
     return "retry"
 
 async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
+    # Check for Video property
     properties = page.locator("div.property")
     for i in range(await properties.count()):
         if "Video" in (await properties.nth(i).inner_text()):
             return "skipped"
 
-    # Wait for heavy iframe/renderer content to settle
+    # CRITICAL: 10s wait for sadbundle/carousel handshakes
     await asyncio.sleep(10.0) 
 
+    # NEW SELECTOR STRATEGY: Target the active renderer directly
+    # This avoids the "hidden policy div" and "carousel ghost" traps
     locators = [
-        "html-renderer iframe", 
-        ".creative-sub-container:not(.hidden) html-renderer", 
-        "html-renderer img",
-        ".creative-sub-container-si:not(.hidden)",
-        ".html-container"
+        "creative:not([class*='hidden']) html-renderer iframe", 
+        "creative:not([class*='hidden']) html-renderer img",
+        "creative:not([class*='hidden']) .html-container",
+        "html-renderer:visible"
     ]
 
     target = None
@@ -61,6 +63,7 @@ async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
             loc = page.locator(selector).first
             if await loc.count() > 0:
                 box = await loc.bounding_box()
+                # Ensure it's a real rendered element, not a 0x0 placeholder
                 if box and box['width'] > 10 and box['height'] > 10:
                     target = loc
                     break
