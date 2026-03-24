@@ -27,52 +27,47 @@ def extract_id_from_url(url):
 def normalize_url(url, target_region):
     if "adstransparency.google.com" not in url:
         return url
-    # Force replacement of ANY existing region parameter
     url = re.sub(r'([\?&])region=[^&]*', r'\1', url).rstrip('?&')
     sep = "&" if "?" in url else "?"
     return f"{url}{sep}region={target_region}"
 
 async def check_page_status(page, url, seq_num):
-    """
-    Categorizes the page state to decide whether to proceed, 
-    try a new region, or stop entirely.
-    """
-    # 1. SUCCESS: Ad content or grid found
-    if await page.locator("fletch-renderer, html-renderer, .html-container, creative-preview, .creative-grid, .creative-si").count() > 0:
+    # 1. SUCCESS Indicators (Including Carousel)
+    if await page.locator("fletch-renderer, html-renderer, .html-container, creative-preview, .creative-grid, .creative-si, .creative-carousel").count() > 0:
+        # FIX: Only terminate if the violation banner is VISIBLE on screen
+        banner = page.locator(".policy-violation-banner").first
+        if await banner.is_visible():
+            log(f"    🛑 [Seq: {seq_num}] TERMINAL: Policy Violation confirmed | {url}")
+            return "terminal"
         return "alive"
     
-    # 2. TERMINAL: Google explicitly says the ID/Advertiser is gone
+    # 2. TERMINAL: Explicit "Not Found" messages
     empty_results = page.locator(".empty-results").first
     if await empty_results.is_visible():
         text = (await empty_results.inner_text()).lower()
         if any(phrase in text for phrase in ["id was not found", "can't find ad", "can't find advertiser"]):
-            log(f"    🛑 [Seq: {seq_num}] TERMINAL: ID/Advertiser not found. Stopping cycle. | {url}")
+            log(f"    🛑 [Seq: {seq_num}] TERMINAL: ID not found | {url}")
             return "terminal"
         return "retry"
-
-    # 3. TERMINAL: Policy Violation
-    if await page.locator(".policy-violation-banner").is_visible():
-        log(f"    🛑 [Seq: {seq_num}] TERMINAL: Policy Violation. Stopping cycle. | {url}")
-        return "terminal"
 
     return "retry"
 
 async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
-    # Skip if Video
+    # --- VIDEO SKIPPING RESTORED ---
     format_locator = page.locator("div.property")
     for i in range(await format_locator.count()):
-        if "Video" in (await format_locator.nth(i).inner_text()):
-            log(f"    ⏭️ [Seq: {seq_num}] SKIPPED: Video Format | {url}")
+        text = await format_locator.nth(i).inner_text()
+        if "Video" in text:
+            log(f"    ⏭️ [Seq: {seq_num}] SKIPPED: Video Format detected | {url}")
             return "skipped"
 
-    # Priority Locators including the new 'Text/SI' format containers
     locators = [
         "creative.creative-si", 
+        ".creative-carousel .creative-container",
         ".html-container", 
         "html-renderer img", 
         ".creative-container > div", 
-        "fletch-renderer",
-        ".creative-container"
+        "fletch-renderer"
     ]
 
     target = None
@@ -91,17 +86,16 @@ async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
         return "broken"
 
     file_path = os.path.join(advertiser_dir, f"{ad_id}.png")
-    await asyncio.sleep(5.0) # Settle animations/fonts
+    await asyncio.sleep(5.0) 
     
     try:
         await target.screenshot(path=file_path)
         log(f"    ✅ [Seq: {seq_num}] GOOGLE SAVED: {ad_id}.png | {url}")
         return "success"
     except Exception:
-        # Final emergency fallback: screenshot the sub-container
         try:
             await page.locator(".creative-sub-container").first.screenshot(path=file_path)
-            log(f"    📸 [Seq: {seq_num}] SAVED via Sub-Container Fallback | {url}")
+            log(f"    📸 [Seq: {seq_num}] SAVED via Fallback | {url}")
             return "success"
         except Exception as e:
             log(f"    ❌ [Seq: {seq_num}] Screenshot Failed: {str(e)[:30]}")
@@ -127,22 +121,23 @@ async def process_link(context, row, seq_num, sem):
                 await page.goto(url, wait_until="networkidle", timeout=GTC_TIMEOUT)
                 
                 if is_google:
-                    await asyncio.sleep(2.0)
+                    await asyncio.sleep(3.0) 
                     status = await check_page_status(page, url, seq_num)
                     
                     if status == "alive":
                         result = await handle_google_variations(page, advertiser_dir, ad_id, seq_num, url)
                         if result in ["success", "skipped"]:
                             await page.close()
-                            return
+                            return # Move to next record
                     elif status == "terminal":
                         await page.close()
-                        return # Kill this URL
+                        return # Stop this record (ID doesn't exist)
                     
-                    log(f"    ℹ️ [Seq: {seq_num}] {region} empty, trying next...")
+                    log(f"    ℹ️ [Seq: {seq_num}] {region} empty/retry, trying next...")
                 
                 elif is_meta:
                     await asyncio.sleep(5)
+                    # REVERTED TO PREVIOUS META SELECTORS
                     meta_target = page.locator("img.xfn06ss, video.xat24cr, .x1ll56u3 img").first
                     if await meta_target.count() > 0:
                         await meta_target.screenshot(path=os.path.join(advertiser_dir, f"{ad_id}.png"))
@@ -162,8 +157,6 @@ async def main():
     shard_index = int(os.environ.get("SHARD_INDEX", 0))
     df = np.array_split(full_df, total_shards)[shard_index]
     
-    log(f"📋 SHARD {shard_index+1}/6 | {len(df)} rows")
-
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context(viewport={'width': 1280, 'height': 1400})
