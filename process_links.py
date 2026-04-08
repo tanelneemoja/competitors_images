@@ -53,19 +53,12 @@ async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
     await asyncio.sleep(5.0) # Initial wait for rendering
 
     # --- Updated Locators (Kept your originals + Added new ones) ---
-   locators = [
-        # 1. Target the specific Fletch iframe structure from your log
-        "fletch-renderer div[id^='fletch-render'] iframe", 
-        
-        # 2. Your original surgical locators
+  locators = [
+        "fletch-renderer div[id^='fletch-render'] iframe",
         "creative:not([class*='hidden']) html-renderer img",
         "creative:not([class*='hidden']) html-renderer iframe", 
-        
-        # 3. New variation-aware locators
         "creative.creative-si:not(.hidden) iframe",
         "creative.creative-si:not(.hidden) img",
-        
-        # 4. Fallbacks
         "html-renderer:visible",
         ".html-container img"
     ]
