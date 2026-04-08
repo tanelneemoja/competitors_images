@@ -38,12 +38,6 @@ async def check_page_status(page):
         return "alive"
     return "retry"
 
-This error is happening because Python is seeing a mix of spaces and tabs, or a single extra space that doesn't align with the def or for blocks above it. Since you are running this in a GitHub Action or similar CI environment, even one "invisible" space will crash the script.
-
-Here is the full function with perfectly cleaned, standard 4-space indentation. Replace your entire handle_google_variations function with this block:
-
-Python
-
 async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
     # 1. Check properties for format exclusion (Video/Text)
     properties = page.locator("div.property")
