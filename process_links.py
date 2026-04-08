@@ -39,55 +39,49 @@ async def check_page_status(page):
     return "retry"
 
 async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
-    # 1. Filter out non-image formats
+    # 1. Skip non-image formats
     properties = page.locator("div.property")
     prop_count = await properties.count()
     
     for i in range(prop_count):
         try:
             text = await properties.nth(i).inner_text()
-            if "Video" in text:
-                return "skipped_video"
-            if "Format: Text" in text:
-                return "skipped_text"
+            if "Video" in text: return "skipped_video"
+            if "Format: Text" in text: return "skipped_text"
         except:
             continue
 
-    # 2. Wait for Google's multi-stage rendering
-    await asyncio.sleep(5.0) 
+    # 2. Heavy buffer for dynamic rendering
+    await asyncio.sleep(6.0) 
 
-    # 3. Finalized Selector Strategy
+    # 3. Targeted Locators
     locators = [
-        # Active Carousel Item (Visible only)
+        "html-renderer iframe[src*='googlesyndication.com']",
         ".creative-sub-container:not(.hidden) fletch-renderer iframe",
         ".creative-sub-container:not(.hidden) html-renderer iframe",
         ".creative-sub-container:not(.hidden) html-renderer img",
-        
-        # Elisa/Swedbank Style: Direct Static Images
-        "creative.creative-si html-renderer img",
-        "html-renderer .html-container img",
-        
-        # General Iframe Renderers
-        "fletch-renderer div[id^='fletch-render'] iframe",
         "html-renderer .html-container iframe",
-        
-        # Fallbacks
-        "creative:not([class*='hidden']) html-renderer img",
-        "html-renderer:visible"
+        "html-renderer .html-container img",
+        "fletch-renderer iframe",
+        "creative.creative-si:not(.hidden) iframe",
+        "creative.creative-si:not(.hidden) img"
     ]
 
     target = None
+    found_selector = None
 
-    # 4. Polling loop to wait for the element to actually have size/visibility
-    for attempt in range(15): 
+    # 4. Polling for visibility and physical dimensions
+    for attempt in range(20): 
         for selector in locators:
             try:
                 loc = page.locator(selector).first
                 if await loc.count() > 0 and await loc.is_visible():
                     box = await loc.bounding_box()
-                    # Ensure it's not a pixel-sized spacer
                     if box and box['width'] > 10 and box['height'] > 10:
                         target = loc
+                        found_selector = selector
+                        # LOGGING FOR SEQ {seq_num}
+                        print(f"    ✅ [Seq {seq_num}] Found target: {selector} ({int(box['width'])}x{int(box['height'])})")
                         break
             except:
                 continue
@@ -96,20 +90,20 @@ async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
         await asyncio.sleep(1.0)
 
     if not target: 
+        print(f"    ❌ [Seq {seq_num}] No visible ad found after 20 attempts.")
         return "broken"
 
-    # 5. Final buffer for high-res asset loading (crucial for Estonia remote)
-    await asyncio.sleep(2.0)
+    # 5. Capture
+    await asyncio.sleep(2.5)
+    # Using the Ad ID as the filename per your instructions
     file_path = os.path.join(advertiser_dir, f"{ad_id}.png")
     
     try:
-        # Scale='css' ensures we capture the ad at the intended web dimensions
         await target.screenshot(path=file_path, scale='css')
         return "success"
     except Exception as e:
-        print(f"    ❌ Screenshot error on {ad_id}: {str(e)[:50]}")
+        print(f"    ❌ [Seq {seq_num}] Screenshot error: {str(e)[:50]}")
         return "failed"
-
 async def process_link(context, row, seq_num, gtc_sem, meta_sem):
     raw_url = str(row.get('creative_page_url', ''))
     is_google = "adstransparency.google.com" in raw_url
