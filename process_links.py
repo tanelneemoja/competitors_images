@@ -39,7 +39,7 @@ async def check_page_status(page):
     return "retry"
 
 async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
-    # 1. Check properties for format exclusion (Video/Text)
+    # 1. Filter out non-image formats
     properties = page.locator("div.property")
     prop_count = await properties.count()
     
@@ -53,31 +53,39 @@ async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
         except:
             continue
 
-    # 2. Initial wait for Google's dynamic scripts to "pop"
+    # 2. Wait for Google's multi-stage rendering
     await asyncio.sleep(5.0) 
 
-    # 3. Comprehensive locator list (Originals + New Fletch patterns)
+    # 3. Finalized Selector Strategy
     locators = [
+        # Active Carousel Item (Visible only)
+        ".creative-sub-container:not(.hidden) fletch-renderer iframe",
+        ".creative-sub-container:not(.hidden) html-renderer iframe",
+        ".creative-sub-container:not(.hidden) html-renderer img",
+        
+        # Elisa/Swedbank Style: Direct Static Images
+        "creative.creative-si html-renderer img",
+        "html-renderer .html-container img",
+        
+        # General Iframe Renderers
         "fletch-renderer div[id^='fletch-render'] iframe",
+        "html-renderer .html-container iframe",
+        
+        # Fallbacks
         "creative:not([class*='hidden']) html-renderer img",
-        "creative:not([class*='hidden']) html-renderer iframe", 
-        "creative.creative-si:not(.hidden) iframe",
-        "creative.creative-si:not(.hidden) img",
-        "html-renderer:visible",
-        ".html-container img"
+        "html-renderer:visible"
     ]
 
     target = None
 
-    # 4. Attempt to find a valid, visible element
+    # 4. Polling loop to wait for the element to actually have size/visibility
     for attempt in range(15): 
         for selector in locators:
             try:
-                # Target only visible elements within active containers
                 loc = page.locator(selector).first
-                if await loc.count() > 0:
+                if await loc.count() > 0 and await loc.is_visible():
                     box = await loc.bounding_box()
-                    # Ensure element has actual size
+                    # Ensure it's not a pixel-sized spacer
                     if box and box['width'] > 10 and box['height'] > 10:
                         target = loc
                         break
@@ -90,16 +98,15 @@ async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
     if not target: 
         return "broken"
 
-    # 5. Final resolution wait and Capture
-    # Important for Estonia/Remote connections to let assets load
-    await asyncio.sleep(2.5)
+    # 5. Final buffer for high-res asset loading (crucial for Estonia remote)
+    await asyncio.sleep(2.0)
     file_path = os.path.join(advertiser_dir, f"{ad_id}.png")
     
     try:
-        await target.screenshot(path=file_path)
+        # Scale='css' ensures we capture the ad at the intended web dimensions
+        await target.screenshot(path=file_path, scale='css')
         return "success"
     except Exception as e:
-        # Log minimal error to keep console clean
         print(f"    ❌ Screenshot error on {ad_id}: {str(e)[:50]}")
         return "failed"
 
