@@ -22,7 +22,6 @@ def sanitize_filename(name):
     return re.sub(r'[<>:"/\\|?*]', '', str(name or "Unknown")).strip()
 
 def extract_id_from_url(url):
-    # Extracts the long numeric ID for BigQuery matching
     match = re.search(r"(?:creative/|id=|sadbundle/|simgad/)([A-Z0-9\d]+)", str(url))
     return match.group(1) if match else "unknown"
 
@@ -40,20 +39,27 @@ async def check_page_status(page):
     return "retry"
 
 async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
-    # Skip videos immediately
+    # Check properties for format exclusion
     properties = page.locator("div.property")
-    for i in range(await properties.count()):
-        if "Video" in (await properties.nth(i).inner_text()):
-            return "skipped"
+    prop_count = await properties.count()
+    
+    for i in range(prop_count):
+        text = await properties.nth(i).inner_text()
+        
+        # SKIP VIDEOS
+        if "Video" in text:
+            return "skipped_video"
+        
+        # SKIP TEXT ADS (Requested for mental health/stability)
+        if "Format: Text" in text:
+            return "skipped_text"
 
-    # CRITICAL: 10s wait for iframe/carousel rendering
     await asyncio.sleep(10.0) 
 
-    # SURGICAL SELECTORS: Only target visible ad content
+    # We keep the "Surgical" locators but they'll mostly hit Images now
     locators = [
-        "creative:not([class*='hidden']) html-renderer iframe", 
         "creative:not([class*='hidden']) html-renderer img",
-        "creative:not([class*='hidden']) .html-container",
+        "creative:not([class*='hidden']) html-renderer iframe", 
         "html-renderer:visible"
     ]
 
@@ -75,7 +81,6 @@ async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
     file_path = os.path.join(advertiser_dir, f"{ad_id}.png")
     
     try:
-        # Capture the exact ad asset
         await target.screenshot(path=file_path)
         return "success"
     except:
@@ -85,17 +90,14 @@ async def process_link(context, row, seq_num, gtc_sem, meta_sem):
     raw_url = str(row.get('creative_page_url', ''))
     is_google = "adstransparency.google.com" in raw_url
     is_meta = "facebook.com/ads/library" in raw_url
-    
-    # Extract ID for BigQuery-ready naming
     ad_id = extract_id_from_url(raw_url)
-    
     advertiser = sanitize_filename(row.get('advertiser_name', 'Unknown'))
     advertiser_dir = os.path.join(BASE_DATA_DIR, advertiser)
     os.makedirs(advertiser_dir, exist_ok=True)
 
     if is_google:
         async with gtc_sem:
-            log(f"🚀 [Seq: {seq_num}] Probing GTC {ad_id}")
+            log(f"🚀 [Seq: {seq_num}] Probing GTC {ad_id} | {raw_url}")
             regions = [DEFAULT_REGION] + FALLBACK_REGIONS
             for region in regions:
                 url = normalize_url(raw_url, region)
@@ -106,20 +108,23 @@ async def process_link(context, row, seq_num, gtc_sem, meta_sem):
                     if status == "alive":
                         res = await handle_google_variations(page, advertiser_dir, ad_id, seq_num, url)
                         if res == "success":
-                            log(f"    ✅ [Seq: {seq_num}] SAVED: {ad_id}.png ({region})")
+                            log(f"    ✅ [Seq: {seq_num}] SAVED: {ad_id}.png ({region}) | {url}")
                             await page.close(); return
-                        elif res == "skipped":
-                            log(f"    ⏭️ [Seq: {seq_num}] SKIPPED: Video Format")
+                        elif res == "skipped_video":
+                            log(f"    ⏭️ [Seq: {seq_num}] SKIPPED: Video | {url}")
+                            await page.close(); return
+                        elif res == "skipped_text":
+                            log(f"    📝 [Seq: {seq_num}] SKIPPED: Text Ad | {url}")
                             await page.close(); return
                     elif status == "terminal":
-                        log(f"    🛑 [Seq: {seq_num}] REGION EMPTY: {region}")
+                        log(f"    🛑 [Seq: {seq_num}] REGION EMPTY: {region} | {url}")
                 except: pass
                 finally: await page.close()
-            log(f"    ⚠️ [Seq: {seq_num}] EXHAUSTED: {ad_id}")
+            log(f"    ⚠️ [Seq: {seq_num}] EXHAUSTED: {ad_id} | {raw_url}")
 
     elif is_meta:
         async with meta_sem:
-            log(f"🔍 [Seq: {seq_num}] START META: {ad_id}")
+            log(f"🔍 [Seq: {seq_num}] START META: {ad_id} | {raw_url}")
             page = await context.new_page()
             try:
                 await page.goto(raw_url, wait_until="domcontentloaded", timeout=GTC_TIMEOUT)
@@ -129,11 +134,11 @@ async def process_link(context, row, seq_num, gtc_sem, meta_sem):
                 meta_target = page.locator("div[role='article'], ._8n-a").first
                 if await meta_target.count() > 0:
                     await meta_target.screenshot(path=os.path.join(advertiser_dir, f"{ad_id}.png"))
-                    log(f"    📸 [Seq: {seq_num}] ADDED META: {ad_id}.png")
+                    log(f"    📸 [Seq: {seq_num}] ADDED META: {ad_id}.png | {raw_url}")
                 else:
-                    log(f"    ⏩ [Seq: {seq_num}] SKIPPED: Meta Ad missing")
+                    log(f"    ⏩ [Seq: {seq_num}] SKIPPED: Meta Ad missing | {raw_url}")
             except Exception as e:
-                log(f"    ❌ [Seq: {seq_num}] FAIL META: {str(e)[:50]}")
+                log(f"    ❌ [Seq: {seq_num}] FAIL META: {str(e)[:50]} | {raw_url}")
             finally:
                 await page.close()
 
