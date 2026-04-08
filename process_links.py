@@ -50,10 +50,9 @@ async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
         if "Format: Text" in text:
             return "skipped_text"
 
-    await asyncio.sleep(5.0) # Initial wait for rendering
+   await asyncio.sleep(5.0) 
 
-    # --- Updated Locators (Kept your originals + Added new ones) ---
-  locators = [
+    locators = [
         "fletch-renderer div[id^='fletch-render'] iframe",
         "creative:not([class*='hidden']) html-renderer img",
         "creative:not([class*='hidden']) html-renderer iframe", 
@@ -64,19 +63,20 @@ async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
     ]
 
     target = None
-    # We use your 15-attempt loop to give the dynamic content time to "pop" into the DOM
+    # 15-attempt loop to find the element
     for attempt in range(15): 
         for selector in locators:
+            # Use .first to avoid "strict mode" violations if multiple ads exist
             loc = page.locator(selector).first
             if await loc.count() > 0:
-                # Ensure it's not just there, but has physical dimensions
                 box = await loc.bounding_box()
                 if box and box['width'] > 10 and box['height'] > 10:
                     target = loc
                     break
-        if target: break
+        if target: 
+            break
         await asyncio.sleep(1.0)
-
+        
     if not target: 
         return "broken"
 
