@@ -39,70 +39,70 @@ async def check_page_status(page):
     return "retry"
 
 async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
-    # 1. Skip non-image formats
+    # 1. Format Filter
     properties = page.locator("div.property")
-    prop_count = await properties.count()
-    
-    for i in range(prop_count):
+    for i in range(await properties.count()):
         try:
             text = await properties.nth(i).inner_text()
-            if "Video" in text: return "skipped_video"
-            if "Format: Text" in text: return "skipped_text"
-        except:
-            continue
+            if any(x in text for x in ["Video", "Format: Text"]):
+                return "skipped_format"
+        except: continue
 
-    # 2. Heavy buffer for dynamic rendering
-    await asyncio.sleep(6.0) 
+    # 2. Adaptive Wait
+    await asyncio.sleep(7.0) # Increased slightly for Seq 211 types
 
-    # 3. Targeted Locators
+    # 3. The "Deep" Locator List
+    # Note the '>>' - this pierces Shadow DOM boundaries
     locators = [
-        "html-renderer iframe[src*='googlesyndication.com']",
-        ".creative-sub-container:not(.hidden) fletch-renderer iframe",
-        ".creative-sub-container:not(.hidden) html-renderer iframe",
-        ".creative-sub-container:not(.hidden) html-renderer img",
-        "html-renderer .html-container iframe",
-        "html-renderer .html-container img",
-        "fletch-renderer iframe",
-        "creative.creative-si:not(.hidden) iframe",
-        "creative.creative-si:not(.hidden) img"
+        "html-renderer >> iframe[src*='googlesyndication.com']",
+        "html-renderer >> .html-container >> iframe",
+        ".creative-sub-container:not(.hidden) fletch-renderer >> iframe",
+        ".creative-sub-container:not(.hidden) html-renderer >> img",
+        "creative.creative-si:not(.hidden) >> img",
+        "html-renderer >> img"
     ]
 
     target = None
-    found_selector = None
-
-    # 4. Polling for visibility and physical dimensions
-    for attempt in range(20): 
+    
+    # 4. Polling Loop
+    for attempt in range(25): # Increased to 25s total for stubborn ads
         for selector in locators:
             try:
+                # Use 'all_inner_texts' check to see if iframe is actually populated
                 loc = page.locator(selector).first
                 if await loc.count() > 0 and await loc.is_visible():
                     box = await loc.bounding_box()
                     if box and box['width'] > 10 and box['height'] > 10:
                         target = loc
-                        found_selector = selector
-                        # LOGGING FOR SEQ {seq_num}
-                        print(f"    ✅ [Seq {seq_num}] Found target: {selector} ({int(box['width'])}x{int(box['height'])})")
+                        print(f"    ✅ [Seq {seq_num}] Found: {selector} ({int(box['width'])}x{int(box['height'])})")
                         break
-            except:
-                continue
-        if target: 
-            break
+            except: continue
+        if target: break
         await asyncio.sleep(1.0)
 
-    if not target: 
-        print(f"    ❌ [Seq {seq_num}] No visible ad found after 20 attempts.")
+    if not target:
+        # FINAL ATTEMPT: If locators failed, try to find ANY large image in the ad area
+        try:
+            backup = page.locator("creative >> img:visible").first
+            b_box = await backup.bounding_box()
+            if b_box and b_box['width'] > 50:
+                target = backup
+                print(f"    ⚠️ [Seq {seq_num}] Using backup image locator")
+        except: pass
+
+    if not target:
+        print(f"    ❌ [Seq {seq_num}] EXHAUSTED - No render detected.")
         return "broken"
 
     # 5. Capture
-    await asyncio.sleep(2.5)
-    # Using the Ad ID as the filename per your instructions
+    await asyncio.sleep(2.0)
     file_path = os.path.join(advertiser_dir, f"{ad_id}.png")
-    
     try:
-        await target.screenshot(path=file_path, scale='css')
+        # Scale 'css' is vital for these high-density syndication banners
+        await target.screenshot(path=file_path, scale='css', timeout=5000)
         return "success"
     except Exception as e:
-        print(f"    ❌ [Seq {seq_num}] Screenshot error: {str(e)[:50]}")
+        print(f"    ❌ [Seq {seq_num}] Screenshot Fail: {str(e)[:40]}")
         return "failed"
 async def process_link(context, row, seq_num, gtc_sem, meta_sem):
     raw_url = str(row.get('creative_page_url', ''))
