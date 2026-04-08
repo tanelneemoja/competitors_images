@@ -39,35 +39,39 @@ async def check_page_status(page):
     return "retry"
 
 async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
-    # Check properties for format exclusion
+    # --- Check properties for format exclusion ---
     properties = page.locator("div.property")
     prop_count = await properties.count()
     
     for i in range(prop_count):
         text = await properties.nth(i).inner_text()
-        
-        # SKIP VIDEOS
         if "Video" in text:
             return "skipped_video"
-        
-        # SKIP TEXT ADS (Requested for mental health/stability)
         if "Format: Text" in text:
             return "skipped_text"
 
-    await asyncio.sleep(10.0) 
+    await asyncio.sleep(5.0) # Initial wait for rendering
 
-    # We keep the "Surgical" locators but they'll mostly hit Images now
+    # --- Updated Locators (Kept your originals + Added new ones) ---
     locators = [
+        # Your original surgical locators
         "creative:not([class*='hidden']) html-renderer img",
         "creative:not([class*='hidden']) html-renderer iframe", 
-        "html-renderer:visible"
+        "html-renderer:visible",
+        # NEW: Specifically for the fletch-renderer/iframe combos in your logs
+        "fletch-renderer iframe",
+        "creative.creative-si iframe",
+        "creative.creative-si img",
+        ".html-container img"
     ]
 
     target = None
+    # We use your 15-attempt loop to give the dynamic content time to "pop" into the DOM
     for attempt in range(15): 
         for selector in locators:
             loc = page.locator(selector).first
             if await loc.count() > 0:
+                # Ensure it's not just there, but has physical dimensions
                 box = await loc.bounding_box()
                 if box and box['width'] > 10 and box['height'] > 10:
                     target = loc
@@ -75,15 +79,18 @@ async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
         if target: break
         await asyncio.sleep(1.0)
 
-    if not target: return "broken"
+    if not target: 
+        return "broken"
 
-    await asyncio.sleep(2.0)
+    # Give the assets (images inside the frames) a moment to fully resolve
+    await asyncio.sleep(2.5)
     file_path = os.path.join(advertiser_dir, f"{ad_id}.png")
     
     try:
         await target.screenshot(path=file_path)
         return "success"
-    except:
+    except Exception as e:
+        log(f"    ❌ Screenshot error on {ad_id}: {str(e)[:50]}")
         return "failed"
 
 async def process_link(context, row, seq_num, gtc_sem, meta_sem):
