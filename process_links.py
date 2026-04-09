@@ -39,7 +39,7 @@ async def check_page_status(page):
     return "retry"
 
 async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
-    # 1. Basic Format Filter
+    # 1. Format Filter (Unchanged)
     properties = page.locator("div.property")
     for i in range(await properties.count()):
         try:
@@ -48,71 +48,61 @@ async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
                 return "skipped_format"
         except: continue
 
-    # 2. Initial Wait for Google UI
-    await asyncio.sleep(5.0) 
+    # 2. Forced Progressive Wait
+    # We wait 5s immediately, then poll for up to 30s.
+    await asyncio.sleep(5.0)
 
-    # 3. High-Priority Selectors for Syndication/Sadbundle
-    # Using '>>' to ensure we pierce any potential Shadow DOM
+    # 3. High-Precision Shadow-Piercing Selectors
     locators = [
         "html-renderer >> iframe[src*='googlesyndication.com']",
         "html-renderer >> .html-container >> iframe",
-        "creative-sub-container:not(.hidden) >> fletch-renderer >> iframe",
-        "html-renderer >> img",
-        "creative.creative-si >> img"
+        "fletch-renderer >> iframe",
+        "creative-sub-container:not(.hidden) >> html-renderer >> img",
+        "html-renderer >> img"
     ]
 
     target = None
     
-    # 4. The Long-Poll Loop (30 seconds total)
-    # This is crucial because 'sadbundle' redirects can be slow in Estonia
-    for attempt in range(30): 
+    # 4. Deep Polling Loop (Up to 30 Attempts)
+    for attempt in range(30):
         for selector in locators:
             try:
+                # First, check if the locator even exists
                 loc = page.locator(selector).first
                 if await loc.count() > 0:
-                    # Check for physical size to ensure it's not a loading pixel
+                    # For iframes, check if the source is loaded (not about:blank)
+                    if "iframe" in selector:
+                        src = await loc.get_attribute("src")
+                        if not src or "about:blank" in src:
+                            continue
+
+                    # Check for physical presence
                     box = await loc.bounding_box()
                     if box and box['width'] > 10 and box['height'] > 10:
                         target = loc
-                        print(f"    ✅ [Seq {seq_num}] Target found via: {selector} ({int(box['width'])}x{int(box['height'])})")
+                        print(f"    ✅ [Seq {seq_num}] Found: {selector} ({int(box['width'])}x{int(box['height'])}) at attempt {attempt}")
                         break
             except: continue
         
         if target: break
-        
-        # If we reach attempt 15 and still nothing, try a force-refresh of the layout
-        if attempt == 15:
-            await page.mouse.wheel(0, 100)
-            await asyncio.sleep(0.5)
-            await page.mouse.wheel(0, -100)
-
-        await asyncio.sleep(1.0)
+        await asyncio.sleep(1.0) # Wait 1s between retries
 
     if not target:
-        print(f"    ❌ [Seq {seq_num}] EXHAUSTED - Ad did not render in 30s.")
+        print(f"    ❌ [Seq {seq_num}] EXHAUSTED - Ad frame did not populate in 30s.")
         return "broken"
 
-    # 5. Asset Loading Buffer
-    # Iframes need a moment to render the internal HTML after the container appears
-    await asyncio.sleep(3.0) 
+    # 5. Final Paint Buffer
+    # Crucial: Finding the iframe is only half the battle. 
+    # We must wait for the "sadbundle" content to paint.
+    await asyncio.sleep(4.0) 
     
     file_path = os.path.join(advertiser_dir, f"{ad_id}.png")
     try:
-        # Increase screenshot timeout for slow network assets
+        # We increase the screenshot timeout for these heavy bundles
         await target.screenshot(path=file_path, scale='css', timeout=15000)
         return "success"
     except Exception as e:
         print(f"    ❌ [Seq {seq_num}] Screenshot Error: {str(e)[:40]}")
-        return "failed"
-    # 5. Capture
-    await asyncio.sleep(2.0)
-    file_path = os.path.join(advertiser_dir, f"{ad_id}.png")
-    try:
-        # Scale 'css' is vital for these high-density syndication banners
-        await target.screenshot(path=file_path, scale='css', timeout=5000)
-        return "success"
-    except Exception as e:
-        print(f"    ❌ [Seq {seq_num}] Screenshot Fail: {str(e)[:40]}")
         return "failed"
 async def process_link(context, row, seq_num, gtc_sem, meta_sem):
     raw_url = str(row.get('creative_page_url', ''))
