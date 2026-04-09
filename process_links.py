@@ -48,49 +48,51 @@ async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
                 return "skipped_format"
         except: continue
 
-    # 2. Universal Initial Wait
-    await asyncio.sleep(6.0)
+    # 2. THE 211 SHIELD: Detect the format immediately
+    is_html_bundle = await page.locator("html-renderer").count() > 0
+    is_fletch = await page.locator("fletch-renderer").count() > 0
+
+    # 3. Targeted Waiting
+    if is_html_bundle:
+        # 211 is a heavy HTML bundle. It needs time to resolve the redirect.
+        await asyncio.sleep(10.0) 
+    else:
+        await asyncio.sleep(6.0)
 
     target = None
-    
-    # --- PATH A: THE 211 FIX (html-renderer / googlesyndication) ---
-    # This specifically targets the heavy HTML5 bundles
-    if await page.locator("html-renderer").count() > 0:
-        # 211 worked best with this specific, un-validated selector
-        target = page.locator("html-renderer >> iframe[src*='googlesyndication.com']").first
-        # We wait extra long for these to paint
-        await asyncio.sleep(4.0) 
 
-    # --- PATH B: THE 221 FIX (fletch-renderer / carousel) ---
-    # This targets the newer fletch ads with multiple variations
-    elif await page.locator("fletch-renderer").count() > 0:
-        # We find the one that is NOT hidden in the carousel
-        loc = page.locator(".creative-sub-container:not(.hidden) fletch-renderer >> iframe").first
-        if await loc.count() > 0:
-            target = loc
+    # --- PATH A: THE 211 FIX (html-renderer) ---
+    if is_html_bundle:
+        # Use the exact selector that worked for 211 before
+        target = page.locator("html-renderer >> iframe[src*='googlesyndication.com']").first
+        
+    # --- PATH B: THE 221 FIX (fletch-renderer) ---
+    elif is_fletch:
+        # We target the visible iframe inside the carousel
+        target = page.locator(".creative-sub-container:not(.hidden) fletch-renderer >> iframe").first
 
     # --- FALLBACK: Standard Image ---
     if not target or await target.count() == 0:
         target = page.locator(".creative-sub-container:not(.hidden) >> img").first
 
-    # 3. Final Physical Validation
-    # We only check bounding box here at the very end
-    try:
+    # 4. Physical Verification with Retry
+    # If the target exists but hasn't painted (width 0), give it 5 more seconds.
+    for _ in range(2):
         if await target.count() > 0:
             box = await target.bounding_box()
-            if not box or box['width'] < 10:
-                print(f"    ⚠️ [Seq {seq_num}] Target found but size is 0. Waiting...")
-                await asyncio.sleep(5.0)
-        else:
-            print(f"    ❌ [Seq {seq_num}] EXHAUSTED - No target located.")
-            return "broken"
-    except:
-        return "failed"
+            if box and box['width'] > 10 and box['height'] > 10:
+                break # It's ready
+        await asyncio.sleep(3.0)
 
-    # 4. Final Capture
+    # 5. Final Capture logic
+    if await target.count() == 0:
+        print(f"    ❌ [Seq {seq_num}] EXHAUSTED - Target never appeared.")
+        return "broken"
+
     file_path = os.path.join(advertiser_dir, f"{ad_id}.png")
     try:
-        # scale='css' handles the scaling issues for both types
+        # Force a small wait to ensure the actual ad image (Tez Tour/Enefit) has painted
+        await asyncio.sleep(2.0)
         await target.screenshot(path=file_path, scale='css', timeout=15000)
         return "success"
     except Exception as e:
