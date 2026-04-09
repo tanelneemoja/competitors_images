@@ -32,9 +32,44 @@ def normalize_url(url, target_region):
     return f"{url}{sep}region={target_region}"
 
 async def check_page_status(page, target_region_code):
-    # REVERTED: Simple check for presence of ad content
-    # This ensures Seq 211 and Seq 221 are both accepted immediately
-    if await page.locator("html-renderer, fletch-renderer, .creative-si, .ad-container").count() > 0:
+    region_map = {"EE": "Estonia", "FI": "Finland", "LV": "Latvia", "LT": "Lithuania"}
+    target_name = region_map.get(target_region_code, "Estonia")
+
+    try:
+        # 1. Check if the current chip already matches our target
+        chip_text_locator = page.locator(".button-text").first
+        if await chip_text_locator.count() > 0:
+            current_text = await chip_text_locator.inner_text()
+            if target_name.lower() in current_text.lower():
+                if await page.locator("html-renderer, fletch-renderer, .creative-si").count() > 0:
+                    return "alive"
+
+        # 2. Interaction: Click to change region if it says "Shown anywhere" or wrong country
+        clear_button = page.locator(".expand-scope-button, .close-icon").first
+        if await clear_button.is_visible():
+            await clear_button.click()
+            await asyncio.sleep(1)
+
+        selector = page.locator(".region-selector, .region-switch, .button-text").first
+        if await selector.is_visible():
+            await selector.click()
+            
+            search_input = page.locator("input[aria-label*='Search'], input[placeholder*='location'], input[role='combobox']").first
+            await search_input.wait_for(state="visible", timeout=5000)
+            await search_input.fill(target_name)
+            await asyncio.sleep(1)
+            await page.keyboard.press("Enter")
+            await asyncio.sleep(3) # Wait for UI to reload content
+
+        # 3. Final verification of ad content
+        if await page.locator("html-renderer, fletch-renderer, .creative-si").count() > 0:
+            return "alive"
+            
+    except Exception as e:
+        log(f"    ⚠️ Region interaction failed: {str(e)[:50]}")
+
+    # Fallback to general visibility
+    if await page.locator("html-renderer, fletch-renderer, .ad-container").count() > 0:
         return "alive"
 
     if await page.locator(".empty-results").first.is_visible():
@@ -53,22 +88,17 @@ async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
         except: continue
 
     # 2. Render Detection
-    # Check for Seq 211 (html-renderer) and Seq 221 (fletch-renderer)
     is_html_bundle = await page.locator("html-renderer").count() > 0
     is_fletch = await page.locator("fletch-renderer").count() > 0
 
-    # Wait for the specific renderer to load content
     await asyncio.sleep(8.0) 
 
     target = None
     if is_html_bundle:
-        # Path for Seq 211
         target = page.locator("html-renderer >> iframe").first
     elif is_fletch:
-        # Path for Seq 221
         target = page.locator("fletch-renderer >> iframe").first
 
-    # Universal Fallback
     if not target or await target.count() == 0:
         target = page.locator(".creative-sub-container:not(.hidden) >> img").first
 
