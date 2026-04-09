@@ -32,12 +32,14 @@ def normalize_url(url, target_region):
     return f"{url}{sep}region={target_region}"
 
 async def check_page_status(page):
-    # Check for empty results first
-    if await page.locator(".empty-results").first.is_visible():
-        return "terminal"
-    # Check for any valid ad renderer
-    if await page.locator("html-renderer, fletch-renderer, .creative-si, .ad-container").count() > 0:
+    # If we see any of the renderers (211 or 221 styles), it's alive
+    if await page.locator("html-renderer, fletch-renderer, .creative-si, iframe, .ad-container").count() > 0:
         return "alive"
+    # Wait slightly if empty-results appears, sometimes it's a false positive during load
+    if await page.locator(".empty-results").first.is_visible():
+        await asyncio.sleep(2.0)
+        if await page.locator(".empty-results").first.is_visible():
+            return "terminal"
     return "retry"
 
 async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
@@ -50,15 +52,15 @@ async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
                 return "skipped_format"
         except: continue
 
-    # 2. Format Detection
+    # 2. Format Detection for Path Splitting
     is_html_bundle = await page.locator("html-renderer").count() > 0
     is_fletch = await page.locator("fletch-renderer").count() > 0
 
     # 3. Targeted Waiting
     if is_html_bundle:
-        await asyncio.sleep(10.0) # 211 needs time for redirect
+        await asyncio.sleep(10.0) # 211 logic
     else:
-        await asyncio.sleep(7.0)  # 221 needs time for carousel init
+        await asyncio.sleep(7.0)  # 221 logic
 
     target = None
 
@@ -66,16 +68,16 @@ async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
     if is_html_bundle:
         target = page.locator("html-renderer >> iframe[src*='googlesyndication.com']").first
         
-    # --- PATH B: THE 221 FIX (Based on your provided HTML) ---
+    # --- PATH B: THE 221 FIX (Carousel visibility) ---
     elif is_fletch:
-        # We find the fletch-renderer inside the container that is NOT hidden
+        # Target only the container that is NOT hidden from your HTML sample
         target = page.locator(".creative-sub-container:not(.hidden) fletch-renderer >> iframe").first
 
     # --- FALLBACK ---
     if not target or await target.count() == 0:
         target = page.locator(".creative-sub-container:not(.hidden) >> img").first
 
-    # 4. Dimension Validation (The "Inflation" Check)
+    # 4. Physical Verification
     for _ in range(3):
         if await target.count() > 0:
             box = await target.bounding_box()
@@ -86,7 +88,6 @@ async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
     if await target.count() == 0:
         return "broken"
 
-    # 5. Capture
     file_path = os.path.join(advertiser_dir, f"{ad_id}.png")
     try:
         await asyncio.sleep(2.0)
@@ -107,7 +108,7 @@ async def process_link(context, row, seq_num, gtc_sem, meta_sem):
 
     if is_google:
         async with gtc_sem:
-            log(f"🚀 [Seq: {seq_num}] Probing GTC {ad_id}")
+            log(f"🚀 [Seq: {seq_num}] Probing GTC {ad_id} | {raw_url}")
             regions = [DEFAULT_REGION] + FALLBACK_REGIONS
             for region in regions:
                 url = normalize_url(raw_url, region)
@@ -115,7 +116,7 @@ async def process_link(context, row, seq_num, gtc_sem, meta_sem):
                 try:
                     await page.goto(url, wait_until="networkidle", timeout=GTC_TIMEOUT)
                     
-                    # URL Guard: Ensure region wasn't stripped
+                    # URL Guard for region persistence
                     if f"region={region}" not in page.url:
                         await page.goto(url, wait_until="networkidle", timeout=GTC_TIMEOUT)
                         await asyncio.sleep(2)
@@ -124,48 +125,49 @@ async def process_link(context, row, seq_num, gtc_sem, meta_sem):
                     if status == "alive":
                         res = await handle_google_variations(page, advertiser_dir, ad_id, seq_num, url)
                         if res == "success":
-                            log(f"    ✅ [Seq: {seq_num}] SAVED ({region})")
+                            log(f"    ✅ [Seq: {seq_num}] SAVED: {ad_id}.png ({region}) | {url}")
                             await page.close(); return
                         elif res == "skipped_format":
-                            log(f"    ⏭️ [Seq: {seq_num}] SKIPPED: Format")
+                            log(f"    ⏭️ [Seq: {seq_num}] SKIPPED: Format (Video/Text) | {url}")
                             await page.close(); return
                     elif status == "terminal":
-                        log(f"    🛑 [Seq: {seq_num}] REGION EMPTY: {region}")
+                        log(f"    🛑 [Seq: {seq_num}] REGION EMPTY: {region} | {url}")
                 except: pass
                 finally: await page.close()
-            log(f"    ⚠️ [Seq: {seq_num}] EXHAUSTED: {ad_id}")
+            log(f"    ⚠️ [Seq: {seq_num}] EXHAUSTED: {ad_id} | {raw_url}")
 
     elif is_meta:
         async with meta_sem:
+            log(f"🔍 [Seq: {seq_num}] START META: {ad_id} | {raw_url}")
             page = await context.new_page()
             try:
                 await page.goto(raw_url, wait_until="domcontentloaded", timeout=GTC_TIMEOUT)
+                try:
+                    await page.wait_for_selector("div[role='article'], ._8n-a", timeout=15000)
+                except: pass
                 meta_target = page.locator("div[role='article'], ._8n-a").first
                 if await meta_target.count() > 0:
                     await meta_target.screenshot(path=os.path.join(advertiser_dir, f"{ad_id}.png"))
-                    log(f"    📸 [Seq: {seq_num}] ADDED META")
-            except: pass
-            finally: await page.close()
+                    log(f"    📸 [Seq: {seq_num}] ADDED META: {ad_id}.png | {raw_url}")
+                else:
+                    log(f"    ⏩ [Seq: {seq_num}] SKIPPED: Meta Ad missing | {raw_url}")
+            except Exception as e:
+                log(f"    ❌ [Seq: {seq_num}] FAIL META: {str(e)[:50]} | {raw_url}")
+            finally:
+                await page.close()
 
 async def main():
     if not os.path.exists(CSV_FILE): return
     full_df = pd.read_csv(CSV_FILE)
-    
-    total_shards = 6 # REVERTED TO 6
+    total_shards = 6 
     shard_index = int(os.environ.get("SHARD_INDEX", 0))
-    
-    shards = np.array_split(full_df, total_shards)
-    df = shards[shard_index]
+    df = np.array_split(full_df, total_shards)[shard_index]
     
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context(
-            viewport={'width': 1280, 'height': 1200},
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-        )
+        context = await browser.new_context(viewport={'width': 1280, 'height': 1200})
         gtc_sem = asyncio.Semaphore(GTC_CONCURRENCY)
         meta_sem = asyncio.Semaphore(META_CONCURRENCY)
-        
         tasks = [process_link(context, row, i, gtc_sem, meta_sem) for i, (_, row) in enumerate(df.iterrows(), 1)]
         await asyncio.gather(*tasks)
         await browser.close()
