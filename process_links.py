@@ -48,62 +48,65 @@ async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
                 return "skipped_format"
         except: continue
 
-    # 2. Forced Progressive Wait
-    # We wait 5s immediately, then poll for up to 30s.
+    # 2. Wait for initial UI load
     await asyncio.sleep(5.0)
 
-    # 3. High-Precision Shadow-Piercing Selectors
+    # 3. Expanded Locator List
+    # We prioritize visible containers and specific fletch-renderers
     locators = [
+        # Target for Seq 221 (Fletch in a visible container)
+        ".creative-sub-container:not(.hidden) fletch-renderer >> iframe",
+        "fletch-renderer >> iframe",
+        # Target for Seq 211 (Sadbundle/HTML)
         "html-renderer >> iframe[src*='googlesyndication.com']",
         "html-renderer >> .html-container >> iframe",
-        "fletch-renderer >> iframe",
-        "creative-sub-container:not(.hidden) >> html-renderer >> img",
-        "html-renderer >> img"
+        # Standard images
+        ".creative-sub-container:not(.hidden) >> img",
+        "creative.creative-si >> img"
     ]
 
     target = None
     
-    # 4. Deep Polling Loop (Up to 30 Attempts)
+    # 4. Polling Loop (30 seconds)
     for attempt in range(30):
         for selector in locators:
             try:
-                # First, check if the locator even exists
                 loc = page.locator(selector).first
                 if await loc.count() > 0:
-                    # For iframes, check if the source is loaded (not about:blank)
+                    # Specific check for Fletch/Adframe iframes
+                    # They start as src="/adframe" and change once loaded
                     if "iframe" in selector:
                         src = await loc.get_attribute("src")
-                        if not src or "about:blank" in src:
+                        if not src or src == "about:blank":
                             continue
-
-                    # Check for physical presence
+                    
                     box = await loc.bounding_box()
                     if box and box['width'] > 10 and box['height'] > 10:
                         target = loc
-                        print(f"    ✅ [Seq {seq_num}] Found: {selector} ({int(box['width'])}x{int(box['height'])}) at attempt {attempt}")
+                        print(f"    ✅ [Seq {seq_num}] Found: {selector} ({int(box['width'])}x{int(box['height'])})")
                         break
             except: continue
         
         if target: break
-        await asyncio.sleep(1.0) # Wait 1s between retries
+        await asyncio.sleep(1.0)
 
     if not target:
-        print(f"    ❌ [Seq {seq_num}] EXHAUSTED - Ad frame did not populate in 30s.")
+        print(f"    ❌ [Seq {seq_num}] EXHAUSTED - Fletch/HTML content failed to render.")
         return "broken"
 
-    # 5. Final Paint Buffer
-    # Crucial: Finding the iframe is only half the battle. 
-    # We must wait for the "sadbundle" content to paint.
+    # 5. The "Fletch" Buffer
+    # Fletch-renderers often have a secondary fade-in animation.
     await asyncio.sleep(4.0) 
     
     file_path = os.path.join(advertiser_dir, f"{ad_id}.png")
     try:
-        # We increase the screenshot timeout for these heavy bundles
+        # scale='css' is mandatory here to capture high-res versions of fletch renders
         await target.screenshot(path=file_path, scale='css', timeout=15000)
         return "success"
     except Exception as e:
         print(f"    ❌ [Seq {seq_num}] Screenshot Error: {str(e)[:40]}")
         return "failed"
+        
 async def process_link(context, row, seq_num, gtc_sem, meta_sem):
     raw_url = str(row.get('creative_page_url', ''))
     is_google = "adstransparency.google.com" in raw_url
