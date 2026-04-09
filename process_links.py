@@ -31,19 +31,33 @@ def normalize_url(url, target_region):
     sep = "&" if "?" in url else "?"
     return f"{url}{sep}region={target_region}"
 
-async def check_page_status(page):
-    # If we see any of the renderers (211 or 221 styles), it's alive
-    if await page.locator("html-renderer, fletch-renderer, .creative-si, iframe, .ad-container").count() > 0:
+async def check_page_status(page, target_region_code):
+    region_map = {"EE": "Estonia", "FI": "Finland", "LV": "Latvia", "LT": "Lithuania"}
+    expected_label = region_map.get(target_region_code, "")
+
+    # Wait for the UI to attempt sync with the region parameter
+    try:
+        await page.wait_for_selector(".button-text", timeout=5000)
+        chip_text = await page.locator(".button-text").first.inner_text()
+        
+        # If UI is stuck on "Anywhere", give it a moment to switch to the regional view
+        if "anywhere" in chip_text.lower() and expected_label != "":
+            await asyncio.sleep(3.0)
+    except:
+        pass
+
+    # Presence of either renderer (211 or 221) means it is alive
+    if await page.locator("html-renderer, fletch-renderer, .creative-si, .ad-container").count() > 0:
         return "alive"
-    # Wait slightly if empty-results appears, sometimes it's a false positive during load
+
+    # Specific check for terminal "no ads" state
     if await page.locator(".empty-results").first.is_visible():
-        await asyncio.sleep(2.0)
-        if await page.locator(".empty-results").first.is_visible():
-            return "terminal"
+        return "terminal"
+        
     return "retry"
 
 async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
-    # 1. Format Filter
+    # 1. Format Filter (Video/Text)
     properties = page.locator("div.property")
     for i in range(await properties.count()):
         try:
@@ -52,32 +66,29 @@ async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
                 return "skipped_format"
         except: continue
 
-    # 2. Format Detection for Path Splitting
+    # 2. Path Detection (211 vs 221)
     is_html_bundle = await page.locator("html-renderer").count() > 0
     is_fletch = await page.locator("fletch-renderer").count() > 0
 
-    # 3. Targeted Waiting
     if is_html_bundle:
-        await asyncio.sleep(10.0) # 211 logic
+        await asyncio.sleep(10.0) # Wait for Seq 211 bundle load
     else:
-        await asyncio.sleep(7.0)  # 221 logic
+        await asyncio.sleep(7.0)  # Wait for Seq 221 carousel/image load
 
     target = None
 
-    # --- PATH A: THE 211 FIX ---
     if is_html_bundle:
+        # Path for Seq 211
         target = page.locator("html-renderer >> iframe[src*='googlesyndication.com']").first
-        
-    # --- PATH B: THE 221 FIX (Carousel visibility) ---
     elif is_fletch:
-        # Target only the container that is NOT hidden from your HTML sample
+        # Path for Seq 221 (targeting the visible variation in the carousel)
         target = page.locator(".creative-sub-container:not(.hidden) fletch-renderer >> iframe").first
 
-    # --- FALLBACK ---
+    # Fallback to standard image if renderers are not detected
     if not target or await target.count() == 0:
         target = page.locator(".creative-sub-container:not(.hidden) >> img").first
 
-    # 4. Physical Verification
+    # Verification of physical element
     for _ in range(3):
         if await target.count() > 0:
             box = await target.bounding_box()
@@ -94,7 +105,6 @@ async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
         await target.screenshot(path=file_path, scale='css', timeout=15000)
         return "success"
     except Exception as e:
-        print(f"    ❌ [Seq {seq_num}] Capture Error: {str(e)[:40]}")
         return "failed"
         
 async def process_link(context, row, seq_num, gtc_sem, meta_sem):
@@ -116,12 +126,7 @@ async def process_link(context, row, seq_num, gtc_sem, meta_sem):
                 try:
                     await page.goto(url, wait_until="networkidle", timeout=GTC_TIMEOUT)
                     
-                    # URL Guard for region persistence
-                    if f"region={region}" not in page.url:
-                        await page.goto(url, wait_until="networkidle", timeout=GTC_TIMEOUT)
-                        await asyncio.sleep(2)
-
-                    status = await check_page_status(page)
+                    status = await check_page_status(page, region)
                     if status == "alive":
                         res = await handle_google_variations(page, advertiser_dir, ad_id, seq_num, url)
                         if res == "success":
