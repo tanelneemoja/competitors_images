@@ -39,7 +39,7 @@ async def check_page_status(page):
     return "retry"
 
 async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
-    # 1. Skip Video/Text (Standard)
+    # 1. Format Filter (Unchanged)
     properties = page.locator("div.property")
     for i in range(await properties.count()):
         try:
@@ -48,18 +48,18 @@ async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
                 return "skipped_format"
         except: continue
 
-    # 2. Strong Initial Wait
+    # 2. Strong Initial Wait for renderers to initialize
     await asyncio.sleep(6.0)
 
-    # 3. Optimized Locator List (Restore 211 priority + Add 221)
-    # The order here is critical: check syndication first, then fletch, then images.
+    # 3. Targeted Locator List
+    # We strictly keep the 211 fix at the top.
+    # For 221, we use a 'visible' check to avoid the hidden variations.
     locators = [
-        "html-renderer >> iframe[src*='googlesyndication.com']", # Fix for 211
-        "fletch-renderer >> iframe",                             # Fix for 221
+        "html-renderer >> iframe[src*='googlesyndication.com']",  # KEEP: Fix for 211
+        "fletch-renderer >> iframe",                              # Fix for 221
         "html-renderer >> .html-container >> iframe",
-        ".creative-sub-container:not(.hidden) >> img",
-        "html-renderer >> img",
-        "creative.creative-si >> img"
+        ".creative-sub-container:not(.hidden) >> img",            # Only capture visible carousel items
+        "html-renderer >> img"
     ]
 
     target = None
@@ -68,15 +68,17 @@ async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
     for attempt in range(30):
         for selector in locators:
             try:
-                loc = page.locator(selector).first
+                # We use .visible filter to ensure we don't grab Seq 221's hidden variations
+                loc = page.locator(selector).filter(has_text="").first 
+                
                 if await loc.count() > 0:
-                    # Let's be less strict about the SRC to ensure we don't skip valid frames
                     src = await loc.get_attribute("src")
-                    if src == "about:blank": # ONLY skip if it's completely empty
+                    # We accept /adframe (221) and googlesyndication (211)
+                    # We only reject if it's literally empty or about:blank
+                    if src == "about:blank" or not src:
                         continue
                     
                     box = await loc.bounding_box()
-                    # If it has physical size, it's our target
                     if box and box['width'] > 10 and box['height'] > 10:
                         target = loc
                         print(f"    ✅ [Seq {seq_num}] Found: {selector} ({int(box['width'])}x{int(box['height'])})")
@@ -87,15 +89,15 @@ async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
         await asyncio.sleep(1.0)
 
     if not target:
-        print(f"    ❌ [Seq {seq_num}] EXHAUSTED - No render found.")
+        print(f"    ❌ [Seq {seq_num}] EXHAUSTED - No valid render detected.")
         return "broken"
 
-    # 5. Capture Buffer
+    # 5. Final Buffer for asset painting
     await asyncio.sleep(4.0) 
     
     file_path = os.path.join(advertiser_dir, f"{ad_id}.png")
     try:
-        # Use scale='css' and a generous timeout
+        # Capture using CSS scaling to handle high-DPI fletch renders
         await target.screenshot(path=file_path, scale='css', timeout=15000)
         return "success"
     except Exception as e:
