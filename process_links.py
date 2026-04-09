@@ -39,7 +39,7 @@ async def check_page_status(page):
     return "retry"
 
 async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
-    # 1. Format Filter (Unchanged)
+    # 1. Format Filter
     properties = page.locator("div.property")
     for i in range(await properties.count()):
         try:
@@ -48,60 +48,53 @@ async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
                 return "skipped_format"
         except: continue
 
-    # 2. Strong Initial Wait for renderers to initialize
+    # 2. Universal Initial Wait
     await asyncio.sleep(6.0)
-
-    # 3. Targeted Locator List
-    # We strictly keep the 211 fix at the top.
-    # For 221, we use a 'visible' check to avoid the hidden variations.
-    locators = [
-        "html-renderer >> iframe[src*='googlesyndication.com']",  # KEEP: Fix for 211
-        "fletch-renderer >> iframe",                              # Fix for 221
-        "html-renderer >> .html-container >> iframe",
-        ".creative-sub-container:not(.hidden) >> img",            # Only capture visible carousel items
-        "html-renderer >> img"
-    ]
 
     target = None
     
-    # 4. Polling Loop (30 seconds)
-    for attempt in range(30):
-        for selector in locators:
-            try:
-                # We use .visible filter to ensure we don't grab Seq 221's hidden variations
-                loc = page.locator(selector).filter(has_text="").first 
-                
-                if await loc.count() > 0:
-                    src = await loc.get_attribute("src")
-                    # We accept /adframe (221) and googlesyndication (211)
-                    # We only reject if it's literally empty or about:blank
-                    if src == "about:blank" or not src:
-                        continue
-                    
-                    box = await loc.bounding_box()
-                    if box and box['width'] > 10 and box['height'] > 10:
-                        target = loc
-                        print(f"    ✅ [Seq {seq_num}] Found: {selector} ({int(box['width'])}x{int(box['height'])})")
-                        break
-            except: continue
-        
-        if target: break
-        await asyncio.sleep(1.0)
+    # --- PATH A: THE 211 FIX (html-renderer / googlesyndication) ---
+    # This specifically targets the heavy HTML5 bundles
+    if await page.locator("html-renderer").count() > 0:
+        # 211 worked best with this specific, un-validated selector
+        target = page.locator("html-renderer >> iframe[src*='googlesyndication.com']").first
+        # We wait extra long for these to paint
+        await asyncio.sleep(4.0) 
 
-    if not target:
-        print(f"    ❌ [Seq {seq_num}] EXHAUSTED - No valid render detected.")
-        return "broken"
+    # --- PATH B: THE 221 FIX (fletch-renderer / carousel) ---
+    # This targets the newer fletch ads with multiple variations
+    elif await page.locator("fletch-renderer").count() > 0:
+        # We find the one that is NOT hidden in the carousel
+        loc = page.locator(".creative-sub-container:not(.hidden) fletch-renderer >> iframe").first
+        if await loc.count() > 0:
+            target = loc
 
-    # 5. Final Buffer for asset painting
-    await asyncio.sleep(4.0) 
-    
+    # --- FALLBACK: Standard Image ---
+    if not target or await target.count() == 0:
+        target = page.locator(".creative-sub-container:not(.hidden) >> img").first
+
+    # 3. Final Physical Validation
+    # We only check bounding box here at the very end
+    try:
+        if await target.count() > 0:
+            box = await target.bounding_box()
+            if not box or box['width'] < 10:
+                print(f"    ⚠️ [Seq {seq_num}] Target found but size is 0. Waiting...")
+                await asyncio.sleep(5.0)
+        else:
+            print(f"    ❌ [Seq {seq_num}] EXHAUSTED - No target located.")
+            return "broken"
+    except:
+        return "failed"
+
+    # 4. Final Capture
     file_path = os.path.join(advertiser_dir, f"{ad_id}.png")
     try:
-        # Capture using CSS scaling to handle high-DPI fletch renders
+        # scale='css' handles the scaling issues for both types
         await target.screenshot(path=file_path, scale='css', timeout=15000)
         return "success"
     except Exception as e:
-        print(f"    ❌ [Seq {seq_num}] Screenshot Error: {str(e)[:40]}")
+        print(f"    ❌ [Seq {seq_num}] Capture Error: {str(e)[:40]}")
         return "failed"
         
 async def process_link(context, row, seq_num, gtc_sem, meta_sem):
