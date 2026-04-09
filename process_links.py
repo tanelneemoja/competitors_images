@@ -82,7 +82,7 @@ async def check_page_status(page, target_region_code):
     return "retry"
 
 async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
-    # 1. Format Filter
+    # 1. Format Filter (Kept exactly as is)
     properties = page.locator("div.property")
     for i in range(await properties.count()):
         try:
@@ -91,35 +91,40 @@ async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
                 return "skipped_format"
         except: continue
 
-    # 2. Render Detection
-    is_html_bundle = await page.locator("html-renderer").count() > 0
-    is_fletch = await page.locator("fletch-renderer").count() > 0
+    # 2. Target the ACTIVE container only (Safe for both standard and carousel)
+    active_container = page.locator(".creative-sub-container:not(.hidden)").first
+    
+    # 3. Wait for any renderer to appear in that active container
+    renderer = active_container.locator("fletch-renderer, html-renderer, .creative-si")
+    try:
+        await renderer.wait_for(state="visible", timeout=8000)
+    except: pass
 
-    await asyncio.sleep(8.0) 
+    await asyncio.sleep(5.0) 
 
-    target = None
-    if is_html_bundle:
-        target = page.locator("html-renderer >> iframe").first
-    elif is_fletch:
-        target = page.locator("fletch-renderer >> iframe").first
-
-    if not target or await target.count() == 0:
-        target = page.locator(".creative-sub-container:not(.hidden) >> img").first
-
-    # Verification loop
-    for _ in range(3):
+    # 4. Try to find the iframe or image inside the active area
+    target = active_container.locator("iframe").first
+    
+    # 5. Verification loop (Improved for carousels, safe for bundles)
+    for _ in range(5): 
         if await target.count() > 0:
             box = await target.bounding_box()
-            if box and box['width'] > 5 and box['height'] > 5:
+            # Wait for expansion (>10px)
+            if box and box['width'] > 10 and box['height'] > 10:
                 break 
         await asyncio.sleep(2.0)
+
+    # Fallback if iframe fails (Kept your img fallback)
+    if await target.count() == 0:
+        target = active_container.locator("img").first
 
     if await target.count() == 0:
         return "broken"
 
+    # 6. Final Screenshot
     file_path = os.path.join(advertiser_dir, f"{ad_id}.png")
     try:
-        await asyncio.sleep(1.0)
+        await asyncio.sleep(2.0) # Settle time
         await target.screenshot(path=file_path, scale='css', timeout=15000)
         return "success"
     except:
