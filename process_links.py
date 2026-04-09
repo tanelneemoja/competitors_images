@@ -82,7 +82,7 @@ async def check_page_status(page, target_region_code):
     return "retry"
 
 async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
-    # 1. Format Filter (Kept exactly as is)
+    # 1. Format Filter (Unchanged)
     properties = page.locator("div.property")
     for i in range(await properties.count()):
         try:
@@ -91,40 +91,46 @@ async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
                 return "skipped_format"
         except: continue
 
-    # 2. Target the ACTIVE container only (Safe for both standard and carousel)
-    active_container = page.locator(".creative-sub-container:not(.hidden)").first
+    # 2. Universal Container Detection
+    # We use a partial match for classes to avoid the '_ngcontent-cvn' trap
+    active_container = page.locator("div[class*='creative-sub-container']:not(.hidden)").first
     
-    # 3. Wait for any renderer to appear in that active container
-    renderer = active_container.locator("fletch-renderer, html-renderer, .creative-si")
+    # 3. Flexible Renderer Wait
+    # This looks for any of Google's 3 rendering engines
+    renderer = active_container.locator("html-renderer, fletch-renderer, .creative-si")
     try:
-        await renderer.wait_for(state="visible", timeout=8000)
-    except: pass
+        # Increased wait slightly because TEZ TOUR (Lithuania) can be slow to route
+        await renderer.wait_for(state="visible", timeout=12000)
+    except:
+        pass
 
-    await asyncio.sleep(5.0) 
+    await asyncio.sleep(6.0) 
 
-    # 4. Try to find the iframe or image inside the active area
+    # 4. Target Resolution
+    # Look for the iframe inside the container we already verified is visible
     target = active_container.locator("iframe").first
     
-    # 5. Verification loop (Improved for carousels, safe for bundles)
+    # 5. Verification Loop
     for _ in range(5): 
         if await target.count() > 0:
             box = await target.bounding_box()
-            # Wait for expansion (>10px)
+            # This covers 221 (carousels) and 211 (standard)
             if box and box['width'] > 10 and box['height'] > 10:
                 break 
         await asyncio.sleep(2.0)
 
-    # Fallback if iframe fails (Kept your img fallback)
+    # Final Image Fallback
     if await target.count() == 0:
         target = active_container.locator("img").first
 
     if await target.count() == 0:
         return "broken"
 
-    # 6. Final Screenshot
+    # 6. Screenshot
     file_path = os.path.join(advertiser_dir, f"{ad_id}.png")
     try:
-        await asyncio.sleep(2.0) # Settle time
+        await asyncio.sleep(2.0)
+        # scale='css' is vital for maintaining the 160x600 skyscraper aspect ratio
         await target.screenshot(path=file_path, scale='css', timeout=15000)
         return "success"
     except:
