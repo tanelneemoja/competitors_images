@@ -39,7 +39,7 @@ async def check_page_status(page):
     return "retry"
 
 async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
-    # 1. Format Filter
+    # 1. Basic Format Filter
     properties = page.locator("div.property")
     for i in range(await properties.count()):
         try:
@@ -48,52 +48,62 @@ async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
                 return "skipped_format"
         except: continue
 
-    # 2. Adaptive Wait
-    await asyncio.sleep(7.0) # Increased slightly for Seq 211 types
+    # 2. Initial Wait for Google UI
+    await asyncio.sleep(5.0) 
 
-    # 3. The "Deep" Locator List
-    # Note the '>>' - this pierces Shadow DOM boundaries
+    # 3. High-Priority Selectors for Syndication/Sadbundle
+    # Using '>>' to ensure we pierce any potential Shadow DOM
     locators = [
         "html-renderer >> iframe[src*='googlesyndication.com']",
         "html-renderer >> .html-container >> iframe",
-        ".creative-sub-container:not(.hidden) fletch-renderer >> iframe",
-        ".creative-sub-container:not(.hidden) html-renderer >> img",
-        "creative.creative-si:not(.hidden) >> img",
-        "html-renderer >> img"
+        "creative-sub-container:not(.hidden) >> fletch-renderer >> iframe",
+        "html-renderer >> img",
+        "creative.creative-si >> img"
     ]
 
     target = None
     
-    # 4. Polling Loop
-    for attempt in range(25): # Increased to 25s total for stubborn ads
+    # 4. The Long-Poll Loop (30 seconds total)
+    # This is crucial because 'sadbundle' redirects can be slow in Estonia
+    for attempt in range(30): 
         for selector in locators:
             try:
-                # Use 'all_inner_texts' check to see if iframe is actually populated
                 loc = page.locator(selector).first
-                if await loc.count() > 0 and await loc.is_visible():
+                if await loc.count() > 0:
+                    # Check for physical size to ensure it's not a loading pixel
                     box = await loc.bounding_box()
                     if box and box['width'] > 10 and box['height'] > 10:
                         target = loc
-                        print(f"    ✅ [Seq {seq_num}] Found: {selector} ({int(box['width'])}x{int(box['height'])})")
+                        print(f"    ✅ [Seq {seq_num}] Target found via: {selector} ({int(box['width'])}x{int(box['height'])})")
                         break
             except: continue
+        
         if target: break
+        
+        # If we reach attempt 15 and still nothing, try a force-refresh of the layout
+        if attempt == 15:
+            await page.mouse.wheel(0, 100)
+            await asyncio.sleep(0.5)
+            await page.mouse.wheel(0, -100)
+
         await asyncio.sleep(1.0)
 
     if not target:
-        # FINAL ATTEMPT: If locators failed, try to find ANY large image in the ad area
-        try:
-            backup = page.locator("creative >> img:visible").first
-            b_box = await backup.bounding_box()
-            if b_box and b_box['width'] > 50:
-                target = backup
-                print(f"    ⚠️ [Seq {seq_num}] Using backup image locator")
-        except: pass
-
-    if not target:
-        print(f"    ❌ [Seq {seq_num}] EXHAUSTED - No render detected.")
+        print(f"    ❌ [Seq {seq_num}] EXHAUSTED - Ad did not render in 30s.")
         return "broken"
 
+    # 5. Asset Loading Buffer
+    # Iframes need a moment to render the internal HTML after the container appears
+    await asyncio.sleep(3.0) 
+    
+    file_path = os.path.join(advertiser_dir, f"{ad_id}.png")
+    try:
+        # Increase screenshot timeout for slow network assets
+        await target.screenshot(path=file_path, scale='css', timeout=15000)
+        return "success"
+    except Exception as e:
+        print(f"    ❌ [Seq {seq_num}] Screenshot Error: {str(e)[:40]}")
+        return "failed"
     # 5. Capture
     await asyncio.sleep(2.0)
     file_path = os.path.join(advertiser_dir, f"{ad_id}.png")
