@@ -36,40 +36,44 @@ async def check_page_status(page, target_region_code):
     target_name = region_map.get(target_region_code, "Estonia")
 
     try:
-        # 1. Check if the current chip already matches our target
+        # 1. Look for the "Clear/Close" button (the 'X') to reset sticky state
+        # In your HTML this is: expand-scope-button-test
+        clear_button = page.locator(".expand-scope-button, .close-icon, material-icon[icon='close']").first
+        if await clear_button.is_visible():
+            await clear_button.click()
+            await asyncio.sleep(1.5) # Wait for reset
+
+        # 2. Check current state - if it's already correct, we are done
         chip_text_locator = page.locator(".button-text").first
         if await chip_text_locator.count() > 0:
             current_text = await chip_text_locator.inner_text()
             if target_name.lower() in current_text.lower():
-                if await page.locator("html-renderer, fletch-renderer, .creative-si").count() > 0:
-                    return "alive"
+                return "alive"
 
-        # 2. Interaction: Click to change region if it says "Shown anywhere" or wrong country
-        clear_button = page.locator(".expand-scope-button, .close-icon").first
-        if await clear_button.is_visible():
-            await clear_button.click()
-            await asyncio.sleep(1)
-
+        # 3. Perform the click/search if we aren't in the right region
         selector = page.locator(".region-selector, .region-switch, .button-text").first
         if await selector.is_visible():
             await selector.click()
             
-            search_input = page.locator("input[aria-label*='Search'], input[placeholder*='location'], input[role='combobox']").first
-            await search_input.wait_for(state="visible", timeout=5000)
+            # Use a more specific selector for the search input
+            search_input = page.locator("input[aria-label*='Region'], input[placeholder*='location'], input[role='combobox']").first
+            await search_input.wait_for(state="visible", timeout=7000)
             await search_input.fill(target_name)
             await asyncio.sleep(1)
             await page.keyboard.press("Enter")
-            await asyncio.sleep(3) # Wait for UI to reload content
+            
+            # CRITICAL: Wait longer for the ad renderer to actually swap/load
+            await asyncio.sleep(5) 
 
-        # 3. Final verification of ad content
+        # Final check for content
         if await page.locator("html-renderer, fletch-renderer, .creative-si").count() > 0:
             return "alive"
             
     except Exception as e:
-        log(f"    ⚠️ Region interaction failed: {str(e)[:50]}")
+        log(f"    ⚠️ Interaction failed for {target_name}: {str(e)[:50]}")
 
-    # Fallback to general visibility
-    if await page.locator("html-renderer, fletch-renderer, .ad-container").count() > 0:
+    # Final "Hail Mary" check
+    if await page.locator("html-renderer, fletch-renderer, iframe[src*='google']").count() > 0:
         return "alive"
 
     if await page.locator(".empty-results").first.is_visible():
