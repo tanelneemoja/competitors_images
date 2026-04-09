@@ -39,7 +39,7 @@ async def check_page_status(page):
     return "retry"
 
 async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
-    # 1. Format Filter (Unchanged)
+    # 1. Skip Video/Text (Standard)
     properties = page.locator("div.property")
     for i in range(await properties.count()):
         try:
@@ -48,20 +48,17 @@ async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
                 return "skipped_format"
         except: continue
 
-    # 2. Wait for initial UI load
-    await asyncio.sleep(5.0)
+    # 2. Strong Initial Wait
+    await asyncio.sleep(6.0)
 
-    # 3. Expanded Locator List
-    # We prioritize visible containers and specific fletch-renderers
+    # 3. Optimized Locator List (Restore 211 priority + Add 221)
+    # The order here is critical: check syndication first, then fletch, then images.
     locators = [
-        # Target for Seq 221 (Fletch in a visible container)
-        ".creative-sub-container:not(.hidden) fletch-renderer >> iframe",
-        "fletch-renderer >> iframe",
-        # Target for Seq 211 (Sadbundle/HTML)
-        "html-renderer >> iframe[src*='googlesyndication.com']",
+        "html-renderer >> iframe[src*='googlesyndication.com']", # Fix for 211
+        "fletch-renderer >> iframe",                             # Fix for 221
         "html-renderer >> .html-container >> iframe",
-        # Standard images
         ".creative-sub-container:not(.hidden) >> img",
+        "html-renderer >> img",
         "creative.creative-si >> img"
     ]
 
@@ -73,14 +70,13 @@ async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
             try:
                 loc = page.locator(selector).first
                 if await loc.count() > 0:
-                    # Specific check for Fletch/Adframe iframes
-                    # They start as src="/adframe" and change once loaded
-                    if "iframe" in selector:
-                        src = await loc.get_attribute("src")
-                        if not src or src == "about:blank":
-                            continue
+                    # Let's be less strict about the SRC to ensure we don't skip valid frames
+                    src = await loc.get_attribute("src")
+                    if src == "about:blank": # ONLY skip if it's completely empty
+                        continue
                     
                     box = await loc.bounding_box()
+                    # If it has physical size, it's our target
                     if box and box['width'] > 10 and box['height'] > 10:
                         target = loc
                         print(f"    ✅ [Seq {seq_num}] Found: {selector} ({int(box['width'])}x{int(box['height'])})")
@@ -91,16 +87,15 @@ async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
         await asyncio.sleep(1.0)
 
     if not target:
-        print(f"    ❌ [Seq {seq_num}] EXHAUSTED - Fletch/HTML content failed to render.")
+        print(f"    ❌ [Seq {seq_num}] EXHAUSTED - No render found.")
         return "broken"
 
-    # 5. The "Fletch" Buffer
-    # Fletch-renderers often have a secondary fade-in animation.
+    # 5. Capture Buffer
     await asyncio.sleep(4.0) 
     
     file_path = os.path.join(advertiser_dir, f"{ad_id}.png")
     try:
-        # scale='css' is mandatory here to capture high-res versions of fletch renders
+        # Use scale='css' and a generous timeout
         await target.screenshot(path=file_path, scale='css', timeout=15000)
         return "success"
     except Exception as e:
