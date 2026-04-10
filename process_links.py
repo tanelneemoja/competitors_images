@@ -82,7 +82,7 @@ async def check_page_status(page, target_region_code):
     return "retry"
 
 async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
-    # 1. Format Filter (Unchanged)
+    # 1. Basic Format Filter
     properties = page.locator("div.property")
     for i in range(await properties.count()):
         try:
@@ -91,48 +91,66 @@ async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
                 return "skipped_format"
         except: continue
 
-    # 2. Find the Visible Container
-    # We look for the sub-container that isn't hidden. 
-    # This works for both 211 (single) and 221 (carousel).
-    containers = page.locator("div[class*='creative-sub-container']:not(.hidden)")
-    active_container = containers.first
+    # 2. Container Selection Strategy
+    # We find all sub-containers that are NOT marked as 'hidden' by Google
+    containers = page.locator("div.creative-sub-container:not(.hidden)")
+    active_container = None
+    
+    # In carousels (221), even non-hidden ones can be the "5px height" ghosts.
+    # We iterate to find the one that actually has a real height.
+    for i in range(await containers.count()):
+        curr = containers.nth(i)
+        # Check the actual rendering box inside the container
+        box_check = await curr.locator("div.creative-container").first.bounding_box()
+        if box_check and box_check['height'] > 10:
+            active_container = curr
+            break
+    
+    # Fallback to first non-hidden if height check fails (for 211 compatibility)
+    if not active_container:
+        active_container = containers.first
 
-    # 3. Target the specific "Creative Box"
-    # This is the div that actually holds the width/height (160x600, 300x484, etc.)
+    if await active_container.count() == 0:
+        return "broken"
+
+    # 3. Target the Renderer Wrapper
+    # Instead of the iframe, we target the div that Google explicitly sets the height on.
+    # For 221, this is the div wrapping the fletch-renderer.
     target = active_container.locator("div.creative-container").first
     
-    # 4. Wait for Hydration (The "5px Check")
-    # Instead of waiting for a renderer, we wait for the target box to have height.
-    is_hydrated = False
-    for _ in range(8): # Total 8 seconds max wait
-        if await target.count() > 0:
-            box = await target.bounding_box()
-            # If it's > 10px, the ad is rendered or rendering.
-            if box and box['height'] > 10:
-                is_hydrated = True
+    # 4. Hydration Loop
+    # We wait for the height to stabilize above 10px.
+    success = False
+    for _ in range(10):  # Wait up to 10 seconds for hydration
+        box = await target.bounding_box()
+        if box and box['height'] > 10:
+            # Check if there is a renderer or image inside yet
+            if await target.locator("fletch-renderer, html-renderer, img").count() > 0:
+                success = True
                 break
         await asyncio.sleep(1.0)
 
-    if not is_hydrated:
-        # If it's still 5px or missing, it's a dead render. Exit now to save the session.
-        return "broken_5px_render"
+    if not success:
+        return "exhausted_render"
 
-    # 5. Stabilize
-    # Give the internal fletch/html a moment to stop flickering.
-    await asyncio.sleep(4.0)
+    # 5. Stabilization Sleep
+    # Carousels need a moment for the 'fletch' script to pull the assets.
+    await asyncio.sleep(5.0)
 
-    # 6. Screenshot the Container
+    # 6. Direct Screenshot
     file_path = os.path.join(advertiser_dir, f"{ad_id}.png")
     try:
-        # Use a strict 5s timeout for the snap itself. 
-        # If the browser can't snap a visible div in 5s, the session is hung.
-        await target.screenshot(path=file_path, scale='css', timeout=5000)
+        # We snap the 'target' div directly. It has the correct width/height.
+        await target.screenshot(
+            path=file_path, 
+            scale='css', 
+            timeout=8000
+        )
         return "success"
     except Exception as e:
-        # Fallback to a broader screenshot if the specific target fails
-        print(f"Target snap failed for {ad_id}, trying element handle...")
+        # Final emergency fallback: snap the whole sub-container
         try:
-            await active_container.screenshot(path=file_path, timeout=3000)
+            await active_container.screenshot(path=file_path, timeout=5000)
             return "success"
         except:
             return "failed"
