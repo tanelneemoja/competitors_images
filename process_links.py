@@ -82,77 +82,60 @@ async def check_page_status(page, target_region_code):
     return "retry"
 
 async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
-    # 1. Format Filter: Skip non-image ads early
+    # 1. Format Filter: Skip early.
     properties = page.locator("div.property")
     for i in range(await properties.count()):
         try:
             text = await properties.nth(i).inner_text()
             if any(x in text for x in ["Video", "Format: Text"]):
                 return "skipped_format"
-        except: 
-            continue
+        except: continue
 
-    # 2. Region Guard: Stop the loop if ad is not available (e.g., Seq 200)
-    # We check for the specific 'empty-results' class from your logs
+    # 2. Region Guard: Immediate skip for "Can't find ad" (Seq 200/202 fix)
     if await page.locator("div.empty-results").count() > 0:
-        print(f"   ❌ [Seq: {seq_num}] Region Lock: Ad not available. Skipping.")
         return "skipped_region_unavailable"
 
-    # 3. Targeted Selection: Carousel (221) vs Standard (211)
-    # Check if this is a carousel-style page
-    is_carousel = await page.locator("div.creative-carousel").count() > 0
+    # 3. Find THE active block (Handles 221 Carousel without breaking 211)
+    # We look for containers that are visible and NOT 5px tall.
     containers = page.locator("div[class*='creative-sub-container']:not(.hidden)")
     target = None
-
-    if is_carousel:
-        # Loop through containers to find the one with actual content height
-        for i in range(await containers.count()):
-            curr = containers.nth(i).locator("div.creative-container").first
-            box = await curr.bounding_box()
-            if box and box['height'] > 10:
-                target = curr
-                break
     
-    # If not a carousel, or if the carousel loop found nothing, take the first visible container
+    for i in range(await containers.count()):
+        # Reach specifically for the div that holds the width/height style
+        curr = containers.nth(i).locator("div.creative-container").first
+        box = await curr.bounding_box()
+        if box and box['height'] > 10:
+            target = curr
+            break
+            
+    # Fallback to absolute first if the loop misses (Safety for 211)
     if not target:
-        target = containers.first.locator("div.creative-container").first
+        target = page.locator("div.creative-sub-container:not(.hidden) div.creative-container").first
 
-    # 4. Hydration Check: The "5px" Guard (Worked for 211)
-    # We wait up to 8 seconds for the container to expand/hydrate
-    is_hydrated = False
-    for _ in range(8):
-        if await target.count() > 0:
-            box = await target.bounding_box()
-            if box and box['height'] > 10:
-                is_hydrated = True
-                break
-        await asyncio.sleep(1.0)
+    # 4. The "Stop Waiting" Wait
+    # 211 worked because of a hard sleep. We keep exactly that. 
+    # We do NOT use wait_for_load_state or any selector-based waits here.
+    await asyncio.sleep(8.0) 
 
-    # Final check for Region Wall if hydration failed (sometimes Google is slow to show the error)
-    if not is_hydrated:
-        if await page.locator("div.empty-results").count() > 0:
-            return "skipped_region_unavailable"
-        return "broken_5px_render"
-
-    # 5. Stabilization Sleep (Worked for 211)
-    await asyncio.sleep(4.0)
-
-    # 6. Screenshot: Target the container directly as per your suggestion
+    # 5. The "No-Exhaustion" Screenshot
+    # We force the screenshot to happen NOW. 
+    # If the ad is an iframe (like 211), Playwright often hangs waiting for it to be 'stable'.
+    # animations="disabled" and a tight timeout prevent that hang.
     file_path = os.path.join(advertiser_dir, f"{ad_id}.png")
     try:
-        # Use a strict 5s timeout and disable animations to prevent exhaustion
         await target.screenshot(
             path=file_path, 
             scale='css', 
-            timeout=5000,
-            animations="disabled"
+            timeout=4000,          # If it hasn't snapped in 4s, something is wrong
+            animations="disabled", # Prevents waiting for loading spinners/flickers
+            caret="hide"
         )
         return "success"
     except Exception:
-        # Emergency Fallback: If the container fails, try to snap the whole active block
+        # Final emergency snap of the whole container if the specific div is being difficult
         try:
-            await containers.first.screenshot(path=file_path, timeout=3000)
-            return "success_fallback"
+            await containers.first.screenshot(path=file_path, timeout=2000)
+            return "success"
         except:
             return "failed"
         
