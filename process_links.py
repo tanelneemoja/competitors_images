@@ -91,48 +91,45 @@ async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
                 return "skipped_format"
         except: continue
 
-    # 2. Region Guard (Stops the Seq 200/202 loop immediately)
+    # 2. EMERGENCY REGION EXIT (Prevents 200/202 from exhausting)
+    # This checks for the "Can't find ad" screen immediately.
+    # If this isn't there, it proceeds to your working logic instantly.
     if await page.locator("div.empty-results").count() > 0:
         return "skipped_region_unavailable"
 
-    # 3. Targeted Selection (Handles 221 Carousel ghosting)
+    # 3. Find the Visible Container (EXACTLY AS PER YOUR WORKING VERSION)
     containers = page.locator("div[class*='creative-sub-container']:not(.hidden)")
-    target = None
+    active_container = containers.first
+
+    # 4. Target the specific "Creative Box"
+    target = active_container.locator("div.creative-container").first
     
-    # Check for valid height to avoid 221's 5px placeholders
-    for i in range(await containers.count()):
-        curr = containers.nth(i).locator("div.creative-container").first
-        box = await curr.bounding_box()
-        if box and box['height'] > 10:
-            target = curr
-            break
-            
-    if not target:
-        target = page.locator("div.creative-sub-container:not(.hidden) div.creative-container").first
+    # 5. Wait for Hydration (EXACTLY AS PER YOUR WORKING VERSION)
+    is_hydrated = False
+    for _ in range(8): 
+        if await target.count() > 0:
+            box = await target.bounding_box()
+            if box and box['height'] > 10:
+                is_hydrated = True
+                break
+        await asyncio.sleep(1.0)
 
-    # 4. The Stability Sleep (8s for 211 to render)
-    await asyncio.sleep(8.0) 
+    if not is_hydrated:
+        return "broken_5px_render"
 
-    # 5. THE FIX: Force the Screenshot
-    # We use a very short timeout and disable ALL playwright-side checks.
+    # 6. Stabilize (EXACTLY AS PER YOUR WORKING VERSION)
+    await asyncio.sleep(4.0)
+
+    # 7. Screenshot (EXACTLY AS PER YOUR WORKING VERSION)
     file_path = os.path.join(advertiser_dir, f"{ad_id}.png")
     try:
-        # 'timeout=3000' ensures we fail fast rather than exhausting the worker
-        # 'animations="disabled"' stops Playwright from waiting for iframe transitions
-        await target.screenshot(
-            path=file_path, 
-            scale='css', 
-            timeout=3000,          
-            animations="disabled", 
-            caret="hide"
-        )
+        await target.screenshot(path=file_path, scale='css', timeout=5000)
         return "success"
-    except Exception:
-        # Emergency Fallback: If target.screenshot hangs, this acts as a safety valve
+    except Exception as e:
+        print(f"Target snap failed for {ad_id}, trying element handle...")
         try:
-            # Snap the whole page if the element is being "difficult"
-            await page.screenshot(path=file_path, timeout=2000)
-            return "success_fallback"
+            await active_container.screenshot(path=file_path, timeout=3000)
+            return "success"
         except:
             return "failed"
         
