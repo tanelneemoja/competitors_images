@@ -91,46 +91,62 @@ async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
                 return "skipped_format"
         except: continue
 
-    # 2. Universal Container Detection
-    # We use a partial match for classes to avoid the '_ngcontent-cvn' trap
-    active_container = page.locator("div[class*='creative-sub-container']:not(.hidden)").first
+    # 2. Universal Container Detection (MODIFIED TO SCAN FOR THE VALID ONE)
+    # We find all containers and look for the one that is NOT hidden AND NOT 5px
+    containers = page.locator("div[class*='creative-sub-container']")
+    active_container = None
     
-    # 3. Flexible Renderer Wait
-    # This looks for any of Google's 3 rendering engines
+    for i in range(await containers.count()):
+        curr = containers.nth(i)
+        # Skip if Google marked it hidden
+        if "hidden" in (await curr.get_attribute("class") or ""):
+            continue
+            
+        # Check if this "visible" container is actually the 5px bug
+        # We check the height of the creative container inside it
+        creative_div = curr.locator("div.creative-container").first
+        if await creative_div.count() > 0:
+            box = await creative_div.bounding_box()
+            if box and box['height'] <= 10:
+                continue # Skip the 5px tall variation
+        
+        active_container = curr
+        break
+
+    if not active_container:
+        return "broken"
+    
+    # 3. Flexible Renderer Wait (Unchanged)
     renderer = active_container.locator("html-renderer, fletch-renderer, .creative-si")
     try:
-        # Increased wait slightly because TEZ TOUR (Lithuania) can be slow to route
         await renderer.wait_for(state="visible", timeout=12000)
     except:
         pass
 
     await asyncio.sleep(6.0) 
 
-    # 4. Target Resolution
-    # Look for the iframe inside the container we already verified is visible
+    # 4. Target Resolution (Unchanged)
     target = active_container.locator("iframe").first
     
-    # 5. Verification Loop
+    # 5. Verification Loop (Unchanged)
     for _ in range(5): 
         if await target.count() > 0:
             box = await target.bounding_box()
-            # This covers 221 (carousels) and 211 (standard)
             if box and box['width'] > 10 and box['height'] > 10:
                 break 
         await asyncio.sleep(2.0)
 
-    # Final Image Fallback
+    # Final Image Fallback (Unchanged)
     if await target.count() == 0:
         target = active_container.locator("img").first
 
     if await target.count() == 0:
         return "broken"
 
-    # 6. Screenshot
+    # 6. Screenshot (Unchanged)
     file_path = os.path.join(advertiser_dir, f"{ad_id}.png")
     try:
         await asyncio.sleep(2.0)
-        # scale='css' is vital for maintaining the 160x600 skyscraper aspect ratio
         await target.screenshot(path=file_path, scale='css', timeout=15000)
         return "success"
     except:
