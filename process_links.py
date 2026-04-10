@@ -82,7 +82,7 @@ async def check_page_status(page, target_region_code):
     return "retry"
 
 async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
-    # 1. Format Filter (Reverted to stable version)
+    # 1. Format Filter (Unchanged)
     properties = page.locator("div.property")
     for i in range(await properties.count()):
         try:
@@ -91,46 +91,55 @@ async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
                 return "skipped_format"
         except: continue
 
-    # 2. Logic Split: Carousel (221) vs Standard (211)
-    is_carousel = await page.locator("div.creative-carousel").count() > 0
+    # 2. Find the Visible Container
+    containers = page.locator("div[class*='creative-sub-container']:not(.hidden)")
     
-    if is_carousel:
-        # TARGETED CHANGE FOR 221 ONLY
-        # Find the one container that is NOT hidden AND has height
-        containers = page.locator("div.creative-sub-container:not(.hidden)")
-        target = None
-        for i in range(await containers.count()):
-            curr = containers.nth(i).locator("div.creative-container").first
-            box = await curr.bounding_box()
+    # --- TARGETED CHANGE FOR 221 ---
+    # We check if the FIRST container is valid (>10px). 
+    # If not (carousel ghost), we look for one that IS valid.
+    target = None
+    container_count = await containers.count()
+    
+    for i in range(container_count):
+        potential_target = containers.nth(i).locator("div.creative-container").first
+        if await potential_target.count() > 0:
+            box = await potential_target.bounding_box()
             if box and box['height'] > 10:
-                target = curr
+                target = potential_target
                 break
-    else:
-        # REVERTED LOGIC FOR 211
-        # Standard ads just take the first visible container immediately
-        target = page.locator("div.creative-sub-container:not(.hidden) div.creative-container").first
+    
+    # If the loop found nothing, fallback to the first one anyway (211 style)
+    if not target:
+        target = containers.first.locator("div.creative-container").first
 
-    if not target or await target.count() == 0:
-        return "broken"
+    # 3. Wait for Hydration (Your working 211 logic)
+    is_hydrated = False
+    for _ in range(8): 
+        if await target.count() > 0:
+            box = await target.bounding_box()
+            if box and box['height'] > 10:
+                is_hydrated = True
+                break
+        await asyncio.sleep(1.0)
 
-    # 3. Stabilization (Reverted to the 6s wait that worked for 211)
-    # We wait for the renderer to at least be attached
-    try:
-        await target.locator("fletch-renderer, html-renderer, iframe").first.wait_for(state="attached", timeout=5000)
-    except:
-        pass
-        
-    await asyncio.sleep(6.0)
+    if not is_hydrated:
+        return "broken_5px_render"
 
-    # 4. Screenshot the Container (Your suggested change)
-    # Capturing the 'target' (the div.creative-container) instead of the iframe
+    # 4. Stabilize (Your working 211 timing)
+    await asyncio.sleep(4.0)
+
+    # 5. Screenshot (Your working 211 snap logic)
     file_path = os.path.join(advertiser_dir, f"{ad_id}.png")
     try:
-        # Tight timeout to prevent exhaustion if the render is frozen
-        await target.screenshot(path=file_path, scale='css', timeout=7000)
+        await target.screenshot(path=file_path, scale='css', timeout=5000)
         return "success"
-    except Exception as e:
-        return "failed"
+    except Exception:
+        try:
+            # Fallback to the active_container if the target box fails
+            await containers.first.screenshot(path=file_path, timeout=3000)
+            return "success"
+        except:
+            return "failed"
         
 async def process_link(context, row, seq_num, gtc_sem, meta_sem):
     raw_url = str(row.get('creative_page_url', ''))
