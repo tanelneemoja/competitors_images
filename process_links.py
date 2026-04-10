@@ -92,26 +92,15 @@ async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
         except: continue
 
     # 2. Universal Container Detection
-    # Detect if we are in a carousel (like 221) or a standard view (like 211)
-    is_carousel = await page.locator("div.creative-carousel").count() > 0
+    # Look for the container that is NOT hidden
     containers = page.locator("div[class*='creative-sub-container']")
     active_container = None
     
     for i in range(await containers.count()):
         curr = containers.nth(i)
         class_attr = await curr.get_attribute("class") or ""
-        
-        # Rule A: Never take hidden containers
         if "hidden" in class_attr:
             continue
-            
-        # Rule B: ONLY for carousels, verify height to skip the 5px duds.
-        # We skip this check for 211 to avoid exhaustion.
-        if is_carousel:
-            creative_box = await curr.locator("div.creative-container").first.bounding_box()
-            if creative_box and creative_box['height'] <= 10:
-                continue
-            
         active_container = curr
         break
 
@@ -119,41 +108,47 @@ async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
         return "broken"
     
     # 3. Flexible Renderer Wait
+    # We wait for the renderer inside the container to exist
     renderer = active_container.locator("html-renderer, fletch-renderer, .creative-si")
     try:
-        # 10s is the sweet spot for TEZ TOUR (211)
-        await renderer.wait_for(state="visible", timeout=10000)
+        await renderer.wait_for(state="attached", timeout=8000)
     except:
         pass
 
-    await asyncio.sleep(6.0) 
-
-    # 4. Target Resolution (iFrame first, then Image)
-    target = active_container.locator("iframe").first
+    # 4. Target Resolution (CHANGED: Targeting the container div)
+    # We target the actual box that Google scales (the .creative-container)
+    target = active_container.locator("div.creative-container").first
     
-    # 5. Verification Loop
-    for _ in range(5): 
+    # 5. Verification Loop (Checks the Container's size)
+    is_stable = False
+    for _ in range(6): 
         if await target.count() > 0:
             box = await target.bounding_box()
-            if box and box['width'] > 10 and box['height'] > 10:
+            # If the container is > 10px, the ad has likely hydrated
+            if box and box['height'] > 10:
+                is_stable = True
                 break 
         await asyncio.sleep(2.0)
 
-    # Final Image Fallback
-    if await target.count() == 0:
-        target = active_container.locator("img").first
+    if not is_stable:
+        # If it's still 5px or 0px after 12 seconds, it's a broken render
+        return "broken_5px_render"
 
-    if await target.count() == 0:
-        return "broken"
-
-    # 6. Screenshot
+    # 6. Screenshot (Targeting the container)
     file_path = os.path.join(advertiser_dir, f"{ad_id}.png")
     try:
-        await asyncio.sleep(2.0)
-        # 15s timeout to ensure 211 doesn't exhaust during the actual snap
-        await target.screenshot(path=file_path, scale='css', timeout=15000)
+        # Extra padding for animations/fletch scripts to finish
+        await asyncio.sleep(3.0) 
+        
+        # Taking the screenshot of the container itself
+        await target.screenshot(
+            path=file_path, 
+            scale='css', 
+            timeout=10000 # Lowered to 10s to prevent session death
+        )
         return "success"
-    except:
+    except Exception as e:
+        print(f"Screenshot failed for {ad_id}: {e}")
         return "failed"
         
 async def process_link(context, row, seq_num, gtc_sem, meta_sem):
