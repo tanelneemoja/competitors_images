@@ -91,65 +91,51 @@ async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
                 return "skipped_format"
         except: continue
 
-    # 2. Universal Container Detection
-    # Look for the container that is NOT hidden
-    containers = page.locator("div[class*='creative-sub-container']")
-    active_container = None
-    
-    for i in range(await containers.count()):
-        curr = containers.nth(i)
-        class_attr = await curr.get_attribute("class") or ""
-        if "hidden" in class_attr:
-            continue
-        active_container = curr
-        break
+    # 2. Find the Visible Container
+    # We look for the sub-container that isn't hidden. 
+    # This works for both 211 (single) and 221 (carousel).
+    containers = page.locator("div[class*='creative-sub-container']:not(.hidden)")
+    active_container = containers.first
 
-    if not active_container:
-        return "broken"
-    
-    # 3. Flexible Renderer Wait
-    # We wait for the renderer inside the container to exist
-    renderer = active_container.locator("html-renderer, fletch-renderer, .creative-si")
-    try:
-        await renderer.wait_for(state="attached", timeout=8000)
-    except:
-        pass
-
-    # 4. Target Resolution (CHANGED: Targeting the container div)
-    # We target the actual box that Google scales (the .creative-container)
+    # 3. Target the specific "Creative Box"
+    # This is the div that actually holds the width/height (160x600, 300x484, etc.)
     target = active_container.locator("div.creative-container").first
     
-    # 5. Verification Loop (Checks the Container's size)
-    is_stable = False
-    for _ in range(6): 
+    # 4. Wait for Hydration (The "5px Check")
+    # Instead of waiting for a renderer, we wait for the target box to have height.
+    is_hydrated = False
+    for _ in range(8): # Total 8 seconds max wait
         if await target.count() > 0:
             box = await target.bounding_box()
-            # If the container is > 10px, the ad has likely hydrated
+            # If it's > 10px, the ad is rendered or rendering.
             if box and box['height'] > 10:
-                is_stable = True
-                break 
-        await asyncio.sleep(2.0)
+                is_hydrated = True
+                break
+        await asyncio.sleep(1.0)
 
-    if not is_stable:
-        # If it's still 5px or 0px after 12 seconds, it's a broken render
+    if not is_hydrated:
+        # If it's still 5px or missing, it's a dead render. Exit now to save the session.
         return "broken_5px_render"
 
-    # 6. Screenshot (Targeting the container)
+    # 5. Stabilize
+    # Give the internal fletch/html a moment to stop flickering.
+    await asyncio.sleep(4.0)
+
+    # 6. Screenshot the Container
     file_path = os.path.join(advertiser_dir, f"{ad_id}.png")
     try:
-        # Extra padding for animations/fletch scripts to finish
-        await asyncio.sleep(3.0) 
-        
-        # Taking the screenshot of the container itself
-        await target.screenshot(
-            path=file_path, 
-            scale='css', 
-            timeout=10000 # Lowered to 10s to prevent session death
-        )
+        # Use a strict 5s timeout for the snap itself. 
+        # If the browser can't snap a visible div in 5s, the session is hung.
+        await target.screenshot(path=file_path, scale='css', timeout=5000)
         return "success"
     except Exception as e:
-        print(f"Screenshot failed for {ad_id}: {e}")
-        return "failed"
+        # Fallback to a broader screenshot if the specific target fails
+        print(f"Target snap failed for {ad_id}, trying element handle...")
+        try:
+            await active_container.screenshot(path=file_path, timeout=3000)
+            return "success"
+        except:
+            return "failed"
         
 async def process_link(context, row, seq_num, gtc_sem, meta_sem):
     raw_url = str(row.get('creative_page_url', ''))
