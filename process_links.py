@@ -91,53 +91,68 @@ async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
                 return "skipped_format"
         except: continue
 
-    # 2. Universal Container Detection
-    # Look for the ONE container that is actually rendered
-    active_container = page.locator("div[class*='creative-sub-container']:not(.hidden)").first
+    # 2. Universal Container Detection (THE FIX)
+    containers = page.locator("div[class*='creative-sub-container']")
+    active_container = None
     
-    # 3. Flexible Renderer Wait - REDUCED TIMEOUT
-    # If it doesn't show up in 5s, it's likely one of these 5px fails
+    for i in range(await containers.count()):
+        curr = containers.nth(i)
+        
+        # Check 1: Is it hidden by class?
+        class_attr = await curr.get_attribute("class") or ""
+        if "hidden" in class_attr:
+            continue
+            
+        # Check 2: Is it the 5px "active" failure?
+        # We check the box of the inner creative container
+        creative_div = curr.locator("div.creative-container").first
+        if await creative_div.count() > 0:
+            box = await creative_div.bounding_box()
+            # If Google says it's active but it's 5px, it's a broken render
+            if box and box['height'] <= 10:
+                continue 
+        
+        active_container = curr
+        break
+
+    if not active_container:
+        # If we only found 5px versions, exit now instead of exhausting
+        return "broken_render_all_5px"
+    
+    # 3. Flexible Renderer Wait (Unchanged)
     renderer = active_container.locator("html-renderer, fletch-renderer, .creative-si")
     try:
-        await renderer.wait_for(state="visible", timeout=5000) 
+        await renderer.wait_for(state="visible", timeout=10000)
     except:
         pass
 
-    # 4. Target Resolution
+    await asyncio.sleep(6.0) 
+
+    # 4. Target Resolution (Unchanged)
     target = active_container.locator("iframe").first
     
-    # 5. Verification & 5PX KILL-SWITCH
-    # We check the box immediately. If it's 5px, we don't even enter the 10-second loop.
-    is_valid = False
+    # 5. Verification Loop (Unchanged)
     for _ in range(5): 
         if await target.count() > 0:
             box = await target.bounding_box()
-            # If it's 5px, Google failed to hydrate the Fletch/HTML bundle
-            if box and box['height'] > 10:
-                is_valid = True
+            if box and box['width'] > 10 and box['height'] > 10:
                 break 
-        await asyncio.sleep(1.5)
+        await asyncio.sleep(2.0)
 
-    # Final Image Fallback (If iframe is 5px or missing)
-    if not is_valid:
+    # Final Image Fallback (Unchanged)
+    if await target.count() == 0:
         target = active_container.locator("img").first
-        if await target.count() > 0:
-            box = await target.bounding_box()
-            if box and box['height'] > 10:
-                is_valid = True
 
-    if not is_valid:
-        return "broken_5px_render"
+    if await target.count() == 0:
+        return "broken"
 
-    # 6. Screenshot with AGGRESSIVE timeout
+    # 6. Screenshot (Unchanged)
     file_path = os.path.join(advertiser_dir, f"{ad_id}.png")
     try:
-        # If it hasn't stabilized by now, it never will.
-        # Reduced screenshot timeout to 5s to prevent session exhaustion.
-        await target.screenshot(path=file_path, scale='css', timeout=5000)
+        await asyncio.sleep(2.0)
+        await target.screenshot(path=file_path, scale='css', timeout=15000)
         return "success"
-    except Exception as e:
-        print(f"Screenshot timed out for {ad_id}: {e}")
+    except:
         return "failed"
         
 async def process_link(context, row, seq_num, gtc_sem, meta_sem):
