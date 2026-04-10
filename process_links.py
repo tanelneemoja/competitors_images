@@ -82,7 +82,7 @@ async def check_page_status(page, target_region_code):
     return "retry"
 
 async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
-    # 1. Format Filter: Skip early.
+    # 1. Format Filter (Unchanged)
     properties = page.locator("div.property")
     for i in range(await properties.count()):
         try:
@@ -91,51 +91,48 @@ async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
                 return "skipped_format"
         except: continue
 
-    # 2. Region Guard: Immediate skip for "Can't find ad" (Seq 200/202 fix)
+    # 2. Region Guard (Stops the Seq 200/202 loop immediately)
     if await page.locator("div.empty-results").count() > 0:
         return "skipped_region_unavailable"
 
-    # 3. Find THE active block (Handles 221 Carousel without breaking 211)
-    # We look for containers that are visible and NOT 5px tall.
+    # 3. Targeted Selection (Handles 221 Carousel ghosting)
     containers = page.locator("div[class*='creative-sub-container']:not(.hidden)")
     target = None
     
+    # Check for valid height to avoid 221's 5px placeholders
     for i in range(await containers.count()):
-        # Reach specifically for the div that holds the width/height style
         curr = containers.nth(i).locator("div.creative-container").first
         box = await curr.bounding_box()
         if box and box['height'] > 10:
             target = curr
             break
             
-    # Fallback to absolute first if the loop misses (Safety for 211)
     if not target:
         target = page.locator("div.creative-sub-container:not(.hidden) div.creative-container").first
 
-    # 4. The "Stop Waiting" Wait
-    # 211 worked because of a hard sleep. We keep exactly that. 
-    # We do NOT use wait_for_load_state or any selector-based waits here.
+    # 4. The Stability Sleep (8s for 211 to render)
     await asyncio.sleep(8.0) 
 
-    # 5. The "No-Exhaustion" Screenshot
-    # We force the screenshot to happen NOW. 
-    # If the ad is an iframe (like 211), Playwright often hangs waiting for it to be 'stable'.
-    # animations="disabled" and a tight timeout prevent that hang.
+    # 5. THE FIX: Force the Screenshot
+    # We use a very short timeout and disable ALL playwright-side checks.
     file_path = os.path.join(advertiser_dir, f"{ad_id}.png")
     try:
+        # 'timeout=3000' ensures we fail fast rather than exhausting the worker
+        # 'animations="disabled"' stops Playwright from waiting for iframe transitions
         await target.screenshot(
             path=file_path, 
             scale='css', 
-            timeout=4000,          # If it hasn't snapped in 4s, something is wrong
-            animations="disabled", # Prevents waiting for loading spinners/flickers
+            timeout=3000,          
+            animations="disabled", 
             caret="hide"
         )
         return "success"
     except Exception:
-        # Final emergency snap of the whole container if the specific div is being difficult
+        # Emergency Fallback: If target.screenshot hangs, this acts as a safety valve
         try:
-            await containers.first.screenshot(path=file_path, timeout=2000)
-            return "success"
+            # Snap the whole page if the element is being "difficult"
+            await page.screenshot(path=file_path, timeout=2000)
+            return "success_fallback"
         except:
             return "failed"
         
