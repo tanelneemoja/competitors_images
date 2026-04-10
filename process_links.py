@@ -91,47 +91,47 @@ async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
                 return "skipped_format"
         except: continue
 
-    # 2. Universal Container Detection (THE FIX)
+    # 2. Universal Container Detection
+    # Detect if we are in a carousel (like 221) or a standard view (like 211)
+    is_carousel = await page.locator("div.creative-carousel").count() > 0
     containers = page.locator("div[class*='creative-sub-container']")
     active_container = None
     
     for i in range(await containers.count()):
         curr = containers.nth(i)
-        
-        # Check 1: Is it hidden by class?
         class_attr = await curr.get_attribute("class") or ""
+        
+        # Rule A: Never take hidden containers
         if "hidden" in class_attr:
             continue
             
-        # Check 2: Is it the 5px "active" failure?
-        # We check the box of the inner creative container
-        creative_div = curr.locator("div.creative-container").first
-        if await creative_div.count() > 0:
-            box = await creative_div.bounding_box()
-            # If Google says it's active but it's 5px, it's a broken render
-            if box and box['height'] <= 10:
-                continue 
-        
+        # Rule B: ONLY for carousels, verify height to skip the 5px duds.
+        # We skip this check for 211 to avoid exhaustion.
+        if is_carousel:
+            creative_box = await curr.locator("div.creative-container").first.bounding_box()
+            if creative_box and creative_box['height'] <= 10:
+                continue
+            
         active_container = curr
         break
 
     if not active_container:
-        # If we only found 5px versions, exit now instead of exhausting
-        return "broken_render_all_5px"
+        return "broken"
     
-    # 3. Flexible Renderer Wait (Unchanged)
+    # 3. Flexible Renderer Wait
     renderer = active_container.locator("html-renderer, fletch-renderer, .creative-si")
     try:
+        # 10s is the sweet spot for TEZ TOUR (211)
         await renderer.wait_for(state="visible", timeout=10000)
     except:
         pass
 
     await asyncio.sleep(6.0) 
 
-    # 4. Target Resolution (Unchanged)
+    # 4. Target Resolution (iFrame first, then Image)
     target = active_container.locator("iframe").first
     
-    # 5. Verification Loop (Unchanged)
+    # 5. Verification Loop
     for _ in range(5): 
         if await target.count() > 0:
             box = await target.bounding_box()
@@ -139,17 +139,18 @@ async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
                 break 
         await asyncio.sleep(2.0)
 
-    # Final Image Fallback (Unchanged)
+    # Final Image Fallback
     if await target.count() == 0:
         target = active_container.locator("img").first
 
     if await target.count() == 0:
         return "broken"
 
-    # 6. Screenshot (Unchanged)
+    # 6. Screenshot
     file_path = os.path.join(advertiser_dir, f"{ad_id}.png")
     try:
         await asyncio.sleep(2.0)
+        # 15s timeout to ensure 211 doesn't exhaust during the actual snap
         await target.screenshot(path=file_path, scale='css', timeout=15000)
         return "success"
     except:
