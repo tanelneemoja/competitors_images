@@ -82,39 +82,45 @@ async def check_page_status(page, target_region_code):
     return "retry"
 
 async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
-    # 1. Format Filter (Unchanged)
+    # 1. Format Filter: Skip non-image ads early
     properties = page.locator("div.property")
     for i in range(await properties.count()):
         try:
             text = await properties.nth(i).inner_text()
             if any(x in text for x in ["Video", "Format: Text"]):
                 return "skipped_format"
-        except: continue
+        except: 
+            continue
 
-    # 2. Find the Visible Container
+    # 2. Region Guard: Stop the loop if ad is not available (e.g., Seq 200)
+    # We check for the specific 'empty-results' class from your logs
+    if await page.locator("div.empty-results").count() > 0:
+        print(f"   ❌ [Seq: {seq_num}] Region Lock: Ad not available. Skipping.")
+        return "skipped_region_unavailable"
+
+    # 3. Targeted Selection: Carousel (221) vs Standard (211)
+    # Check if this is a carousel-style page
+    is_carousel = await page.locator("div.creative-carousel").count() > 0
     containers = page.locator("div[class*='creative-sub-container']:not(.hidden)")
-    
-    # --- TARGETED CHANGE FOR 221 ---
-    # We check if the FIRST container is valid (>10px). 
-    # If not (carousel ghost), we look for one that IS valid.
     target = None
-    container_count = await containers.count()
-    
-    for i in range(container_count):
-        potential_target = containers.nth(i).locator("div.creative-container").first
-        if await potential_target.count() > 0:
-            box = await potential_target.bounding_box()
+
+    if is_carousel:
+        # Loop through containers to find the one with actual content height
+        for i in range(await containers.count()):
+            curr = containers.nth(i).locator("div.creative-container").first
+            box = await curr.bounding_box()
             if box and box['height'] > 10:
-                target = potential_target
+                target = curr
                 break
     
-    # If the loop found nothing, fallback to the first one anyway (211 style)
+    # If not a carousel, or if the carousel loop found nothing, take the first visible container
     if not target:
         target = containers.first.locator("div.creative-container").first
 
-    # 3. Wait for Hydration (Your working 211 logic)
+    # 4. Hydration Check: The "5px" Guard (Worked for 211)
+    # We wait up to 8 seconds for the container to expand/hydrate
     is_hydrated = False
-    for _ in range(8): 
+    for _ in range(8):
         if await target.count() > 0:
             box = await target.bounding_box()
             if box and box['height'] > 10:
@@ -122,22 +128,31 @@ async def handle_google_variations(page, advertiser_dir, ad_id, seq_num, url):
                 break
         await asyncio.sleep(1.0)
 
+    # Final check for Region Wall if hydration failed (sometimes Google is slow to show the error)
     if not is_hydrated:
+        if await page.locator("div.empty-results").count() > 0:
+            return "skipped_region_unavailable"
         return "broken_5px_render"
 
-    # 4. Stabilize (Your working 211 timing)
+    # 5. Stabilization Sleep (Worked for 211)
     await asyncio.sleep(4.0)
 
-    # 5. Screenshot (Your working 211 snap logic)
+    # 6. Screenshot: Target the container directly as per your suggestion
     file_path = os.path.join(advertiser_dir, f"{ad_id}.png")
     try:
-        await target.screenshot(path=file_path, scale='css', timeout=5000)
+        # Use a strict 5s timeout and disable animations to prevent exhaustion
+        await target.screenshot(
+            path=file_path, 
+            scale='css', 
+            timeout=5000,
+            animations="disabled"
+        )
         return "success"
     except Exception:
+        # Emergency Fallback: If the container fails, try to snap the whole active block
         try:
-            # Fallback to the active_container if the target box fails
             await containers.first.screenshot(path=file_path, timeout=3000)
-            return "success"
+            return "success_fallback"
         except:
             return "failed"
         
