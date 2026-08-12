@@ -10,7 +10,7 @@ import numpy as np
 import base64
 
 # --- CONFIGURATION ---
-CSV_FILE = "BALLZY_Table.csv"
+CSV_FILE = "meta_links.csv"
 BASE_DATA_DIR = "data"
 META_CONCURRENCY = 15
 GTC_TIMEOUT = 60000
