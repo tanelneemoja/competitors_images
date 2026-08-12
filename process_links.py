@@ -15,7 +15,6 @@ CSV_FILE = "BALLZY_Table.csv"
 BASE_DATA_DIR = "data"
 META_CONCURRENCY = 15
 GTC_TIMEOUT = 60000
-ROW_LIMIT = 10  # 👈 Process only the first 10 rows for testing
 
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
@@ -66,7 +65,7 @@ def append_to_github_summary(file_path, ad_id, seq_num, shard_tag):
             encoded = base64.b64encode(img_f.read()).decode("utf-8")
 
         markdown_block = (
-            f"<details open><summary><b>[{shard_tag} | Seq: {seq_num}] Ad ID: {ad_id}</b></summary>\n\n"
+            f"<details><summary><b>[{shard_tag} | Seq: {seq_num}] Ad ID: {ad_id}</b></summary>\n\n"
             f'<img src="data:image/png;base64,{encoded}" width="350"/>\n'
             f"</details>\n\n"
         )
@@ -128,16 +127,16 @@ async def process_meta_link(context, row, seq_num, meta_sem, shard_tag):
 
             save_path = os.path.join(advertiser_dir, f"{ad_id}.png")
 
-            # 5. Capture screenshot (Overwrites existing file on disk)
+            # 5. Capture screenshot
             if card_locator and await card_locator.is_visible():
                 await card_locator.screenshot(path=save_path)
                 append_to_github_summary(save_path, ad_id, seq_num, shard_tag)
-                log(f"    📸 [{shard_tag} | Seq: {seq_num}] OVERWROTE AD CARD: {save_path}")
+                log(f"    📸 [{shard_tag} | Seq: {seq_num}] SAVED AD CARD: {save_path}")
             else:
                 # Full page fallback if specific elements aren't isolated
                 await page.screenshot(path=save_path, full_page=True)
                 append_to_github_summary(save_path, ad_id, seq_num, shard_tag)
-                log(f"    📸 [{shard_tag} | Seq: {seq_num}] OVERWROTE FULL PAGE FALLBACK: {save_path}")
+                log(f"    📸 [{shard_tag} | Seq: {seq_num}] SAVED FULL PAGE FALLBACK: {save_path}")
 
         except Exception as e:
             log(f"    ❌ [{shard_tag} | Seq: {seq_num}] FAIL META: {str(e)[:60]} | {raw_url}")
@@ -164,7 +163,6 @@ async def main():
     # 3. Read CSV and filter Meta links
     full_df = pd.read_csv(CSV_FILE)
     
-    # Relaxed mask: matches facebook.com ad links, fb.me links, or creative URLs
     meta_mask = full_df['creative_page_url'].astype(str).str.contains(
         r"facebook\.com|fb\.me", case=False, na=False
     )
@@ -174,31 +172,25 @@ async def main():
         log("⚠️ No Meta links matching 'facebook.com' or 'fb.me' found. Exiting.")
         return
 
-    # ------------------------------------------------------------------
-    # 🧪 TEST LIMIT: Cap dataset to the first 10 Meta links before sharding
-    # ------------------------------------------------------------------
-    if len(meta_df) > ROW_LIMIT:
-        log(f"🧪 APPLYING TEST LIMIT: Processing first {ROW_LIMIT} rows out of {len(meta_df)} total Meta links.")
-        meta_df = meta_df.head(ROW_LIMIT).copy()
-
-    # Assign persistent global index (1 to N)
+    # Assign persistent global index (1 to N) across FULL dataset
     meta_df['global_seq'] = range(1, len(meta_df) + 1)
+    total_rows = len(meta_df)
 
-    # 4. Dynamic Sharding Execution
+    # 4. Dynamic Sharding Execution across full dataset
     if total_shards > 1:
         shards = np.array_split(meta_df, total_shards)
         df_to_process = shards[shard_index]
         
         if len(df_to_process) == 0:
-            log(f"🧩 [{shard_tag}] No rows assigned to this shard for the {ROW_LIMIT}-row test batch.")
+            log(f"🧩 [{shard_tag}] No rows assigned to this shard.")
             return
 
         seq_min = df_to_process['global_seq'].min()
         seq_max = df_to_process['global_seq'].max()
-        log(f"🧩 Running {shard_tag} ({len(df_to_process)} assigned | Range: Seq {seq_min} to {seq_max}).")
+        log(f"🧩 Running {shard_tag} ({len(df_to_process)} / {total_rows} assigned | Range: Seq {seq_min} to {seq_max}).")
     else:
         df_to_process = meta_df
-        log(f"🚀 Processing all {len(df_to_process)} test Meta links.")
+        log(f"🚀 Processing all {total_rows} Meta links.")
 
     # 5. Launch Playwright
     async with async_playwright() as p:
