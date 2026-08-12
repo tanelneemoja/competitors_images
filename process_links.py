@@ -77,7 +77,7 @@ def append_to_github_summary(file_path, ad_id, seq_num, shard_tag):
 async def process_meta_link(context, row, seq_num, meta_sem, shard_tag):
     raw_url = str(row.get('creative_page_url', ''))
     ad_id = extract_id_from_url(raw_url)
-    advertiser = sanitize_filename(row.get('advertiser_name', 'Unknown'))
+    advertiser = sanitize_filename(row.get('advertiser', 'Unknown'))
     advertiser_dir = os.path.join(BASE_DATA_DIR, advertiser)
     
     os.makedirs(advertiser_dir, exist_ok=True)
@@ -106,23 +106,26 @@ async def process_meta_link(context, row, seq_num, meta_sem, shard_tag):
 
             await page.wait_for_timeout(3500)
 
-            # 4. Target structural containers
+            # 4. Target ONLY the Ad Creative Card (excluding top Meta metadata header)
             card_locator = None
             
-            modal_card = page.locator("[role='dialog']").filter(has=page.locator("text=This ad is from a URL link"))
-            dynamic_container = page.locator("[data-testid='ad-library-dynamic-content-container']")
-            article_card = page.locator("[role='article']")
+            # Selector A: Specific wrapper class containing the advertiser header + post body + image/cta
+            ad_card = page.locator("div._8nsi, div._8nqp").first
+            
+            # Selector B: Fallback targeting the container child with "Sponsored" label
+            sponsored_card = page.locator("div").filter(has=page.locator("text='Sponsored'")).last
 
-            if await modal_card.count() > 0 and await modal_card.first.is_visible():
-                inner_card = modal_card.first.locator("div").filter(has_text="Sponsored").first
-                if await inner_card.count() > 0 and await inner_card.is_visible():
-                    card_locator = inner_card
+            if await ad_card.count() > 0 and await ad_card.is_visible():
+                # Step up 1 level if needed to capture full image/CTA wrapper
+                parent_wrapper = ad_card.locator("xpath=..")
+                if await parent_wrapper.count() > 0 and await parent_wrapper.is_visible():
+                    card_locator = parent_wrapper
                 else:
-                    card_locator = modal_card.first
-            elif await dynamic_container.count() > 0 and await dynamic_container.first.is_visible():
-                card_locator = dynamic_container.first
-            elif await article_card.count() > 0 and await article_card.first.is_visible():
-                card_locator = article_card.first
+                    card_locator = ad_card
+            elif await sponsored_card.count() > 0 and await sponsored_card.is_visible():
+                card_locator = sponsored_card
+            elif await page.locator("[role='article']").count() > 0:
+                card_locator = page.locator("[role='article']").first
 
             save_path = os.path.join(advertiser_dir, f"{ad_id}.png")
 
@@ -131,11 +134,6 @@ async def process_meta_link(context, row, seq_num, meta_sem, shard_tag):
                 await card_locator.screenshot(path=save_path)
                 append_to_github_summary(save_path, ad_id, seq_num, shard_tag)
                 log(f"    📸 [{shard_tag} | Seq: {seq_num}] SAVED AD CARD: {save_path}")
-            else:
-                fallback_path = os.path.join(advertiser_dir, f"{ad_id}_full.png")
-                await page.screenshot(path=fallback_path)
-                append_to_github_summary(fallback_path, ad_id, seq_num, shard_tag)
-                log(f"    📸 [{shard_tag} | Seq: {seq_num}] SAVED FALLBACK: {fallback_path}")
 
         except Exception as e:
             log(f"    ❌ [{shard_tag} | Seq: {seq_num}] FAIL META: {str(e)[:60]} | {raw_url}")
