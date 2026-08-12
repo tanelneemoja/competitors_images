@@ -132,7 +132,7 @@ async def process_meta_link(context, row, seq_num, meta_sem, shard_tag):
             # 3. Wait for video poster / image assets to fully render
             await page.wait_for_timeout(3500)
 
-            # 4. Check for primary container
+           # 4. Check primary container testid first
             primary_locator = page.locator("div[data-testid='ad-library-dynamic-content-container']").first
 
             if await primary_locator.count() > 0 and await primary_locator.is_visible():
@@ -140,23 +140,26 @@ async def process_meta_link(context, row, seq_num, meta_sem, shard_tag):
                 append_to_github_summary(save_path, ad_id, seq_num, shard_tag)
                 log(f"    📸 [{shard_tag} | Seq: {seq_num}] SAVED AD CARD (JPG): {save_path}")
             else:
-                # 5. Fallback logic: Anchor on "Library ID:" parent card that encloses images, videos, or video containers
+                # 5. Robust Fallback: Locates full card parent wrapping Header, Video/Image & CTA
                 card_locator = page.locator(
                     "xpath=//*[contains(text(), 'Library ID:')]/ancestor::div["
-                    "div//img or div//video or .//div[@data-testid='ad-content-body-video-container']"
-                    "][1]"
+                    ".//video or .//div[@data-testid='ad-content-body-video-container'] or .//a[contains(@href, 'l.facebook.com')]"
+                    "][last()]"
                 ).first
-                
-                # Check if "Additional assets from this ad" exists
+
+                # Secondary fallback if [last()] ancestor evaluates too high
+                if await card_locator.count() == 0 or not await card_locator.is_visible():
+                    card_locator = page.locator("xpath=//*[contains(text(), 'Library ID:')]/ancestor::div[2]").first
+
                 assets_heading = page.locator("xpath=//*[contains(text(), 'Additional assets from this ad')]").first
-                
+
                 if await card_locator.count() > 0 and await card_locator.is_visible():
                     card_box = await card_locator.bounding_box()
-                    
+
+                    # Crop out "Additional assets" section if present
                     if assets_heading and await assets_heading.count() > 0 and await assets_heading.is_visible():
                         heading_box = await assets_heading.bounding_box()
-                        
-                        # Clip box ending right above "Additional assets"
+
                         if card_box and heading_box and heading_box['y'] > card_box['y']:
                             clip_height = max(100, heading_box['y'] - card_box['y'])
                             await page.screenshot(
@@ -174,7 +177,7 @@ async def process_meta_link(context, row, seq_num, meta_sem, shard_tag):
                             log(f"    📸 [{shard_tag} | Seq: {seq_num}] SAVED CROPPED CARD (JPG): {save_path}")
                             return
 
-                    # Standard screenshot of card container
+                    # Full card screenshot
                     await card_locator.screenshot(path=save_path, type="jpeg", quality=80)
                     append_to_github_summary(save_path, ad_id, seq_num, shard_tag)
                     log(f"    📸 [{shard_tag} | Seq: {seq_num}] SAVED ANCHORED CARD (JPG): {save_path}")
