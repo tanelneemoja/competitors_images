@@ -106,31 +106,31 @@ async def process_meta_link(context, row, seq_num, meta_sem, shard_tag):
 
             await page.wait_for_timeout(3500)
 
-            # 4. Target ONLY the Ad Creative Card (excluding top Meta metadata header)
+           # 4. Target the isolated ad creative card without depending on hashed class names
             card_locator = None
             
-            # Selector A: Specific wrapper class containing the advertiser header + post body + image/cta
-            ad_card = page.locator("div._8nsi, div._8nqp").first
+            # Selector 1: Stable, explicit data-testid attribute for the creative wrapper
+            dynamic_container = page.locator("div[data-testid='ad-library-dynamic-content-container']")
             
-            # Selector B: Fallback targeting the container child with "Sponsored" label
-            sponsored_card = page.locator("div").filter(has=page.locator("text='Sponsored'")).last
-
-            if await ad_card.count() > 0 and await ad_card.is_visible():
-                # Step up 1 level if needed to capture full image/CTA wrapper
-                parent_wrapper = ad_card.locator("xpath=..")
-                if await parent_wrapper.count() > 0 and await parent_wrapper.is_visible():
-                    card_locator = parent_wrapper
-                else:
-                    card_locator = ad_card
-            elif await sponsored_card.count() > 0 and await sponsored_card.is_visible():
-                card_locator = sponsored_card
-            elif await page.locator("[role='article']").count() > 0:
-                card_locator = page.locator("[role='article']").first
+            if await dynamic_container.count() > 0 and await dynamic_container.is_visible():
+                card_locator = dynamic_container.first
+            else:
+                # Selector 2: Anchor to the 'Sponsored' text node and walk up to its main container box
+                # Finds the ancestor container right below the <hr> divider / metadata section
+                sponsored_node = page.locator("text='Sponsored'").first
+                if await sponsored_node.count() > 0:
+                    # XPath explanation:
+                    # - Tries finding data-testid parent first
+                    # - Fallback: steps up to the div immediately following the horizontal rule (<hr>)
+                    card_locator = sponsored_node.locator(
+                        "xpath=ancestor::div[@data-testid='ad-library-dynamic-content-container'] | "
+                        "ancestor::hr/following-sibling::div[1]"
+                    ).first
 
             save_path = os.path.join(advertiser_dir, f"{ad_id}.png")
 
-            # 5. Capture isolated ad card screenshot
-            if card_locator:
+            # 5. Capture screenshot
+            if card_locator and await card_locator.is_visible():
                 await card_locator.screenshot(path=save_path)
                 append_to_github_summary(save_path, ad_id, seq_num, shard_tag)
                 log(f"    📸 [{shard_tag} | Seq: {seq_num}] SAVED AD CARD: {save_path}")
