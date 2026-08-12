@@ -51,7 +51,7 @@ def reset_data_directory():
 
     log(f"✨ Clean '{BASE_DATA_DIR}' directory ready.")
 
-async def process_meta_link(context, row, seq_num, meta_sem):
+async def process_meta_link(context, row, seq_num, meta_sem, shard_tag):
     raw_url = str(row.get('creative_page_url', ''))
     ad_id = extract_id_from_url(raw_url)
     advertiser = sanitize_filename(row.get('advertiser_name', 'Unknown'))
@@ -60,12 +60,11 @@ async def process_meta_link(context, row, seq_num, meta_sem):
     os.makedirs(advertiser_dir, exist_ok=True)
 
     async with meta_sem:
-        log(f"🔍 [Seq: {seq_num}] START META: {ad_id} | Advertiser: {advertiser}")
+        log(f"🔍 [{shard_tag} | Seq: {seq_num}] START META: {ad_id} | Advertiser: {advertiser}")
         page = await context.new_page()
         try:
             await page.goto(raw_url, wait_until="domcontentloaded", timeout=GTC_TIMEOUT)
             
-            # Wait for main ad container or body elements to load
             try:
                 await page.wait_for_selector("div[role='article'], ._8n-a, body", timeout=15000)
             except Exception:
@@ -75,14 +74,13 @@ async def process_meta_link(context, row, seq_num, meta_sem):
             if await meta_target.count() > 0:
                 save_path = os.path.join(advertiser_dir, f"{ad_id}.png")
                 await meta_target.screenshot(path=save_path)
-                log(f"    📸 [Seq: {seq_num}] SAVED META: {save_path}")
+                log(f"    📸 [{shard_tag} | Seq: {seq_num}] SAVED META: {save_path}")
             else:
-                # Fallback: capture full page screenshot if target card element isn't isolated
                 save_path = os.path.join(advertiser_dir, f"{ad_id}_full.png")
                 await page.screenshot(path=save_path)
-                log(f"    📸 [Seq: {seq_num}] SAVED FULL PAGE FALLBACK: {save_path}")
+                log(f"    📸 [{shard_tag} | Seq: {seq_num}] SAVED FULL PAGE FALLBACK: {save_path}")
         except Exception as e:
-            log(f"    ❌ [Seq: {seq_num}] FAIL META: {str(e)[:60]} | {raw_url}")
+            log(f"    ❌ [{shard_tag} | Seq: {seq_num}] FAIL META: {str(e)[:60]} | {raw_url}")
         finally:
             await page.close()
 
@@ -94,14 +92,16 @@ async def main():
     # 1. Reset data directory at start
     reset_data_directory()
 
-    # 2. Read CSV and filter ONLY Meta links (supports both library and archive/render URLs)
+    # 2. Read CSV and filter ONLY Meta links
     full_df = pd.read_csv(CSV_FILE)
     
-    # Matches facebook.com/ads/library OR facebook.com/ads/archive
     meta_mask = full_df['creative_page_url'].astype(str).str.contains(
         r"facebook\.com/ads/(?:library|archive)", case=False, na=False
     )
     meta_df = full_df[meta_mask].copy()
+    
+    # Assign global row sequence (1 to N) before sharding
+    meta_df['global_seq'] = range(1, len(meta_df) + 1)
     
     log(f"📊 CSV Summary: {len(full_df)} total rows loaded | {len(meta_df)} Meta links identified.")
 
@@ -112,11 +112,12 @@ async def main():
     # 3. Apply Sharding specifically to Meta links
     total_shards = int(os.environ.get("TOTAL_SHARDS", 1))
     shard_index = int(os.environ.get("SHARD_INDEX", 0))
+    shard_tag = f"Shard {shard_index + 1}/{total_shards}"
     
     if total_shards > 1:
         shards = np.array_split(meta_df, total_shards)
         df_to_process = shards[shard_index]
-        log(f"🧩 Running Shard {shard_index + 1}/{total_shards} ({len(df_to_process)} Meta links assigned).")
+        log(f"🧩 Running {shard_tag} ({len(df_to_process)} Meta links assigned: Seq {df_to_process['global_seq'].min()} to {df_to_process['global_seq'].max()}).")
     else:
         df_to_process = meta_df
         log(f"🚀 Single run processing all {len(df_to_process)} Meta links.")
@@ -127,9 +128,10 @@ async def main():
         context = await browser.new_context(viewport={'width': 1280, 'height': 1200})
         meta_sem = asyncio.Semaphore(META_CONCURRENCY)
         
+        # Pass row['global_seq'] instead of enumerate index
         tasks = [
-            process_meta_link(context, row, i, meta_sem) 
-            for i, (_, row) in enumerate(df_to_process.iterrows(), 1)
+            process_meta_link(context, row, int(row['global_seq']), meta_sem, shard_tag) 
+            for _, row in df_to_process.iterrows()
         ]
         await asyncio.gather(*tasks)
         await browser.close()
