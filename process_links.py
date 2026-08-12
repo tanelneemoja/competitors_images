@@ -8,7 +8,6 @@ import urllib.parse
 from playwright.async_api import async_playwright
 from datetime import datetime
 import numpy as np
-import aiohttp
 import base64
 
 # --- CONFIGURATION ---
@@ -16,6 +15,7 @@ CSV_FILE = "BALLZY_Table.csv"
 BASE_DATA_DIR = "data"
 META_CONCURRENCY = 15
 GTC_TIMEOUT = 60000
+ROW_LIMIT = 10  # 👈 Process only the first 10 rows for testing
 
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
@@ -54,21 +54,6 @@ def reset_data_directory():
 
     log(f"✨ Clean '{BASE_DATA_DIR}' directory ready.")
 
-async def upload_preview_link(file_path):
-    """Uploads saved image to file.io so it can be clicked directly from runner logs."""
-    try:
-        async with aiohttp.ClientSession() as session:
-            with open(file_path, 'rb') as f:
-                data = aiohttp.FormData()
-                data.add_field('file', f)
-                async with session.post('https://file.io/?expires=1d', data=data) as resp:
-                    res = await resp.json()
-                    if res.get('success'):
-                        return res.get('link')
-    except Exception:
-        pass
-    return None
-
 def append_to_github_summary(file_path, ad_id, seq_num, shard_tag):
     """Appends an embedded thumbnail directly into the GitHub Actions Job Summary UI."""
     summary_file = os.environ.get("GITHUB_STEP_SUMMARY")
@@ -80,7 +65,7 @@ def append_to_github_summary(file_path, ad_id, seq_num, shard_tag):
             encoded = base64.b64encode(img_f.read()).decode("utf-8")
 
         markdown_block = (
-            f"<details><summary><b>[{shard_tag} | Seq: {seq_num}] Ad ID: {ad_id}</b></summary>\n\n"
+            f"<details open><summary><b>[{shard_tag} | Seq: {seq_num}] Ad ID: {ad_id}</b></summary>\n\n"
             f'<img src="data:image/png;base64,{encoded}" width="350"/>\n'
             f"</details>\n\n"
         )
@@ -92,7 +77,7 @@ def append_to_github_summary(file_path, ad_id, seq_num, shard_tag):
 async def process_meta_link(context, row, seq_num, meta_sem, shard_tag):
     raw_url = str(row.get('creative_page_url', ''))
     ad_id = extract_id_from_url(raw_url)
-    advertiser = sanitize_filename(row.get('advertiser', 'Unknown'))
+    advertiser = sanitize_filename(row.get('advertiser_name', 'Unknown'))
     advertiser_dir = os.path.join(BASE_DATA_DIR, advertiser)
     
     os.makedirs(advertiser_dir, exist_ok=True)
@@ -113,16 +98,15 @@ async def process_meta_link(context, row, seq_num, meta_sem, shard_tag):
             except Exception:
                 pass
 
-            # 3. Wait out the loading state and spinners
+            # 3. Wait out loading spinners
             try:
                 await page.wait_for_selector("text=Loading...", state="detached", timeout=10000)
             except Exception:
                 pass
 
-            # Buffer for high-res creative assets to complete rendering
             await page.wait_for_timeout(3500)
 
-            # 4. Target STABLE structural containers (ignores obfuscated class names)
+            # 4. Target structural containers
             card_locator = None
             
             modal_card = page.locator("[role='dialog']").filter(has=page.locator("text=This ad is from a URL link"))
@@ -145,19 +129,13 @@ async def process_meta_link(context, row, seq_num, meta_sem, shard_tag):
             # 5. Capture isolated ad card screenshot
             if card_locator:
                 await card_locator.screenshot(path=save_path)
-                preview_link = await upload_preview_link(save_path)
                 append_to_github_summary(save_path, ad_id, seq_num, shard_tag)
-                
-                link_msg = f" | Live Preview: {preview_link}" if preview_link else ""
-                log(f"    📸 [{shard_tag} | Seq: {seq_num}] SAVED AD CARD: {save_path}{link_msg}")
+                log(f"    📸 [{shard_tag} | Seq: {seq_num}] SAVED AD CARD: {save_path}")
             else:
                 fallback_path = os.path.join(advertiser_dir, f"{ad_id}_full.png")
                 await page.screenshot(path=fallback_path)
-                preview_link = await upload_preview_link(fallback_path)
                 append_to_github_summary(fallback_path, ad_id, seq_num, shard_tag)
-                
-                link_msg = f" | Live Preview: {preview_link}" if preview_link else ""
-                log(f"    📸 [{shard_tag} | Seq: {seq_num}] SAVED FALLBACK: {fallback_path}{link_msg}")
+                log(f"    📸 [{shard_tag} | Seq: {seq_num}] SAVED FALLBACK: {fallback_path}")
 
         except Exception as e:
             log(f"    ❌ [{shard_tag} | Seq: {seq_num}] FAIL META: {str(e)[:60]} | {raw_url}")
@@ -184,14 +162,20 @@ async def main():
         log("⚠️ No Meta links found matching 'facebook.com/ads/library' or 'facebook.com/ads/archive'. Exiting.")
         return
 
-    # Assign persistent global index (1 to N) before sharding
+    # ------------------------------------------------------------------
+    # 🧪 TEST LIMIT: Cap dataset to the first 10 Meta links before sharding
+    # ------------------------------------------------------------------
+    if len(meta_df) > ROW_LIMIT:
+        log(f"🧪 APPLYING TEST LIMIT: Processing first {ROW_LIMIT} rows out of {len(meta_df)} total Meta links.")
+        meta_df = meta_df.head(ROW_LIMIT).copy()
+
+    # Assign persistent global index (1 to N)
     meta_df['global_seq'] = range(1, len(meta_df) + 1)
 
     # 3. Dynamic Sharding Logic
     shard_index = int(os.environ.get("SHARD_INDEX", 0))
-    total_shards = int(os.environ.get("TOTAL_SHARDS", 6)) # Defaults to 6 shards
+    total_shards = int(os.environ.get("TOTAL_SHARDS", 6))
 
-    # Guard against mismatched TOTAL_SHARDS vs SHARD_INDEX
     if shard_index >= total_shards:
         total_shards = shard_index + 1
 
@@ -200,13 +184,17 @@ async def main():
     if total_shards > 1:
         shards = np.array_split(meta_df, total_shards)
         df_to_process = shards[shard_index]
+        
+        if len(df_to_process) == 0:
+            log(f"🧩 [{shard_tag}] No rows assigned to this shard for the {ROW_LIMIT}-row test batch.")
+            return
+
         seq_min = df_to_process['global_seq'].min()
         seq_max = df_to_process['global_seq'].max()
-        log(f"📊 CSV Summary: {len(full_df)} total rows | {len(meta_df)} Meta links.")
         log(f"🧩 Running {shard_tag} ({len(df_to_process)} assigned | Range: Seq {seq_min} to {seq_max}).")
     else:
         df_to_process = meta_df
-        log(f"🚀 Single run processing all {len(df_to_process)} Meta links.")
+        log(f"🚀 Processing all {len(df_to_process)} test Meta links.")
 
     # 4. Launch Playwright
     async with async_playwright() as p:
