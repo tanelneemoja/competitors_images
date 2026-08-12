@@ -14,7 +14,7 @@ CSV_FILE = "meta_links.csv"
 BASE_DATA_DIR = "data"
 META_CONCURRENCY = 15
 GTC_TIMEOUT = 60000
-TEST_LIMIT = 40  # Set to None or 0 to process the full dataset
+TEST_LIMIT = 45  # Set to None or 0 to process the full dataset
 
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
@@ -118,16 +118,18 @@ async def process_meta_link(context, row, seq_num, meta_sem, shard_tag):
             # 1. Navigation
             await page.goto(raw_url, wait_until="domcontentloaded", timeout=GTC_TIMEOUT)
 
-            # 2. Dynamic wait for primary card or role container
+            # 2. Dynamic wait for primary containers (Image or Video)
             try:
                 await page.wait_for_selector(
-                    "div[data-testid='ad-library-dynamic-content-container'], [role='dialog'], [role='article']",
+                    "div[data-testid='ad-library-dynamic-content-container'], "
+                    "div[data-testid='ad-content-body-video-container'], "
+                    "[role='dialog'], [role='article']",
                     timeout=10000
                 )
             except Exception:
                 pass
 
-            # 3. Pause for image/lazy-asset loading
+            # 3. Wait for video poster / image assets to fully render
             await page.wait_for_timeout(3500)
 
             # 4. Check for primary container
@@ -138,10 +140,14 @@ async def process_meta_link(context, row, seq_num, meta_sem, shard_tag):
                 append_to_github_summary(save_path, ad_id, seq_num, shard_tag)
                 log(f"    📸 [{shard_tag} | Seq: {seq_num}] SAVED AD CARD (JPG): {save_path}")
             else:
-                # 5. Fallback logic: Locate "Library ID:" parent card and crop out "Additional assets"
-                card_locator = page.locator("xpath=//*[contains(text(), 'Library ID:')]/ancestor::div[div//img][1]").first
+                # 5. Fallback logic: Anchor on "Library ID:" parent card that encloses images, videos, or video containers
+                card_locator = page.locator(
+                    "xpath=//*[contains(text(), 'Library ID:')]/ancestor::div["
+                    "div//img or div//video or .//div[@data-testid='ad-content-body-video-container']"
+                    "][1]"
+                ).first
                 
-                # Check if "Additional assets from this ad" exists on page
+                # Check if "Additional assets from this ad" exists
                 assets_heading = page.locator("xpath=//*[contains(text(), 'Additional assets from this ad')]").first
                 
                 if await card_locator.count() > 0 and await card_locator.is_visible():
@@ -150,7 +156,7 @@ async def process_meta_link(context, row, seq_num, meta_sem, shard_tag):
                     if assets_heading and await assets_heading.count() > 0 and await assets_heading.is_visible():
                         heading_box = await assets_heading.bounding_box()
                         
-                        # Calculate clip box ending above the "Additional assets" header
+                        # Clip box ending right above "Additional assets"
                         if card_box and heading_box and heading_box['y'] > card_box['y']:
                             clip_height = max(100, heading_box['y'] - card_box['y'])
                             await page.screenshot(
@@ -168,7 +174,7 @@ async def process_meta_link(context, row, seq_num, meta_sem, shard_tag):
                             log(f"    📸 [{shard_tag} | Seq: {seq_num}] SAVED CROPPED CARD (JPG): {save_path}")
                             return
 
-                    # Standard screenshot of card container if no assets header was found
+                    # Standard screenshot of card container
                     await card_locator.screenshot(path=save_path, type="jpeg", quality=80)
                     append_to_github_summary(save_path, ad_id, seq_num, shard_tag)
                     log(f"    📸 [{shard_tag} | Seq: {seq_num}] SAVED ANCHORED CARD (JPG): {save_path}")
