@@ -5,30 +5,17 @@ import re
 import shutil
 import stat
 import urllib.parse
-import threading
-from http.server import SimpleHTTPRequestHandler, HTTPServer
 from playwright.async_api import async_playwright
 from datetime import datetime
 import numpy as np
+import aiohttp
+import base64
 
 # --- CONFIGURATION ---
 CSV_FILE = "BALLZY_Table.csv"
 BASE_DATA_DIR = "data"
 META_CONCURRENCY = 15
 GTC_TIMEOUT = 60000
-HTTP_PORT = 8000
-
-def start_local_server(port=8000):
-    """Starts a lightweight HTTP server in the background to serve saved screenshots in real time."""
-    class QuietHTTPRequestHandler(SimpleHTTPRequestHandler):
-        def log_message(self, format, *args):
-            # Suppress standard HTTP request logging to keep terminal output clean
-            pass
-
-    server = HTTPServer(('0.0.0.0', port), QuietHTTPRequestHandler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    return server
 
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
@@ -67,16 +54,45 @@ def reset_data_directory():
 
     log(f"✨ Clean '{BASE_DATA_DIR}' directory ready.")
 
-def get_preview_url(file_path):
-    """Converts a local file path into an accessible local HTTP URL."""
-    rel_path = os.path.relpath(file_path, start=".")
-    url_path = urllib.parse.quote(rel_path.replace("\\", "/"))
-    return f"http://localhost:{HTTP_PORT}/{url_path}"
+async def upload_preview_link(file_path):
+    """Uploads saved image to file.io so it can be clicked directly from runner logs."""
+    try:
+        async with aiohttp.ClientSession() as session:
+            with open(file_path, 'rb') as f:
+                data = aiohttp.FormData()
+                data.add_field('file', f)
+                async with session.post('https://file.io/?expires=1d', data=data) as resp:
+                    res = await resp.json()
+                    if res.get('success'):
+                        return res.get('link')
+    except Exception:
+        pass
+    return None
+
+def append_to_github_summary(file_path, ad_id, seq_num, shard_tag):
+    """Appends an embedded thumbnail directly into the GitHub Actions Job Summary UI."""
+    summary_file = os.environ.get("GITHUB_STEP_SUMMARY")
+    if not summary_file or not os.path.exists(file_path):
+        return
+
+    try:
+        with open(file_path, "rb") as img_f:
+            encoded = base64.b64encode(img_f.read()).decode("utf-8")
+
+        markdown_block = (
+            f"<details><summary><b>[{shard_tag} | Seq: {seq_num}] Ad ID: {ad_id}</b></summary>\n\n"
+            f'<img src="data:image/png;base64,{encoded}" width="350"/>\n'
+            f"</details>\n\n"
+        )
+        with open(summary_file, "a", encoding="utf-8") as f:
+            f.write(markdown_block)
+    except Exception:
+        pass
 
 async def process_meta_link(context, row, seq_num, meta_sem, shard_tag):
     raw_url = str(row.get('creative_page_url', ''))
     ad_id = extract_id_from_url(raw_url)
-    advertiser = sanitize_filename(row.get('advertiser_name', 'Unknown'))
+    advertiser = sanitize_filename(row.get('advertiser', 'Unknown'))
     advertiser_dir = os.path.join(BASE_DATA_DIR, advertiser)
     
     os.makedirs(advertiser_dir, exist_ok=True)
@@ -129,13 +145,19 @@ async def process_meta_link(context, row, seq_num, meta_sem, shard_tag):
             # 5. Capture isolated ad card screenshot
             if card_locator:
                 await card_locator.screenshot(path=save_path)
-                preview_url = get_preview_url(save_path)
-                log(f"    📸 [{shard_tag} | Seq: {seq_num}] SAVED AD CARD: {save_path} | Preview: {preview_url}")
+                preview_link = await upload_preview_link(save_path)
+                append_to_github_summary(save_path, ad_id, seq_num, shard_tag)
+                
+                link_msg = f" | Live Preview: {preview_link}" if preview_link else ""
+                log(f"    📸 [{shard_tag} | Seq: {seq_num}] SAVED AD CARD: {save_path}{link_msg}")
             else:
                 fallback_path = os.path.join(advertiser_dir, f"{ad_id}_full.png")
                 await page.screenshot(path=fallback_path)
-                preview_url = get_preview_url(fallback_path)
-                log(f"    📸 [{shard_tag} | Seq: {seq_num}] SAVED FALLBACK: {fallback_path} | Preview: {preview_url}")
+                preview_link = await upload_preview_link(fallback_path)
+                append_to_github_summary(fallback_path, ad_id, seq_num, shard_tag)
+                
+                link_msg = f" | Live Preview: {preview_link}" if preview_link else ""
+                log(f"    📸 [{shard_tag} | Seq: {seq_num}] SAVED FALLBACK: {fallback_path}{link_msg}")
 
         except Exception as e:
             log(f"    ❌ [{shard_tag} | Seq: {seq_num}] FAIL META: {str(e)[:60]} | {raw_url}")
@@ -150,11 +172,7 @@ async def main():
     # 1. Reset local data directory at start
     reset_data_directory()
 
-    # 2. Start local HTTP preview server
-    start_local_server(HTTP_PORT)
-    log(f"🌐 Image preview server listening on http://localhost:{HTTP_PORT}")
-
-    # 3. Read CSV and filter ONLY Meta links
+    # 2. Read CSV and filter ONLY Meta links
     full_df = pd.read_csv(CSV_FILE)
     
     meta_mask = full_df['creative_page_url'].astype(str).str.contains(
@@ -169,7 +187,7 @@ async def main():
     # Assign persistent global index (1 to N) before sharding
     meta_df['global_seq'] = range(1, len(meta_df) + 1)
 
-    # 4. Dynamic Sharding Logic
+    # 3. Dynamic Sharding Logic
     shard_index = int(os.environ.get("SHARD_INDEX", 0))
     total_shards = int(os.environ.get("TOTAL_SHARDS", 6)) # Defaults to 6 shards
 
@@ -190,7 +208,7 @@ async def main():
         df_to_process = meta_df
         log(f"🚀 Single run processing all {len(df_to_process)} Meta links.")
 
-    # 5. Launch Playwright
+    # 4. Launch Playwright
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context(viewport={'width': 1280, 'height': 1200})
