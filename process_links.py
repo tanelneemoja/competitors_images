@@ -4,6 +4,9 @@ import pandas as pd
 import re
 import shutil
 import stat
+import urllib.parse
+import threading
+from http.server import SimpleHTTPRequestHandler, HTTPServer
 from playwright.async_api import async_playwright
 from datetime import datetime
 import numpy as np
@@ -13,6 +16,19 @@ CSV_FILE = "BALLZY_Table.csv"
 BASE_DATA_DIR = "data"
 META_CONCURRENCY = 15
 GTC_TIMEOUT = 60000
+HTTP_PORT = 8000
+
+def start_local_server(port=8000):
+    """Starts a lightweight HTTP server in the background to serve saved screenshots in real time."""
+    class QuietHTTPRequestHandler(SimpleHTTPRequestHandler):
+        def log_message(self, format, *args):
+            # Suppress standard HTTP request logging to keep terminal output clean
+            pass
+
+    server = HTTPServer(('0.0.0.0', port), QuietHTTPRequestHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server
 
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
@@ -50,6 +66,12 @@ def reset_data_directory():
             log(f"⚠️ Could not delete {item_path}: {e}")
 
     log(f"✨ Clean '{BASE_DATA_DIR}' directory ready.")
+
+def get_preview_url(file_path):
+    """Converts a local file path into an accessible local HTTP URL."""
+    rel_path = os.path.relpath(file_path, start=".")
+    url_path = urllib.parse.quote(rel_path.replace("\\", "/"))
+    return f"http://localhost:{HTTP_PORT}/{url_path}"
 
 async def process_meta_link(context, row, seq_num, meta_sem, shard_tag):
     raw_url = str(row.get('creative_page_url', ''))
@@ -107,10 +129,13 @@ async def process_meta_link(context, row, seq_num, meta_sem, shard_tag):
             # 5. Capture isolated ad card screenshot
             if card_locator:
                 await card_locator.screenshot(path=save_path)
-                log(f"    📸 [{shard_tag} | Seq: {seq_num}] SAVED AD CARD: {save_path}")
+                preview_url = get_preview_url(save_path)
+                log(f"    📸 [{shard_tag} | Seq: {seq_num}] SAVED AD CARD: {save_path} | Preview: {preview_url}")
             else:
-                await page.screenshot(path=save_path)
-                log(f"    📸 [{shard_tag} | Seq: {seq_num}] SAVED FALLBACK VIEWPORT: {save_path}")
+                fallback_path = os.path.join(advertiser_dir, f"{ad_id}_full.png")
+                await page.screenshot(path=fallback_path)
+                preview_url = get_preview_url(fallback_path)
+                log(f"    📸 [{shard_tag} | Seq: {seq_num}] SAVED FALLBACK: {fallback_path} | Preview: {preview_url}")
 
         except Exception as e:
             log(f"    ❌ [{shard_tag} | Seq: {seq_num}] FAIL META: {str(e)[:60]} | {raw_url}")
@@ -125,7 +150,11 @@ async def main():
     # 1. Reset local data directory at start
     reset_data_directory()
 
-    # 2. Read CSV and filter ONLY Meta links
+    # 2. Start local HTTP preview server
+    start_local_server(HTTP_PORT)
+    log(f"🌐 Image preview server listening on http://localhost:{HTTP_PORT}")
+
+    # 3. Read CSV and filter ONLY Meta links
     full_df = pd.read_csv(CSV_FILE)
     
     meta_mask = full_df['creative_page_url'].astype(str).str.contains(
@@ -140,7 +169,7 @@ async def main():
     # Assign persistent global index (1 to N) before sharding
     meta_df['global_seq'] = range(1, len(meta_df) + 1)
 
-    # 3. Dynamic Sharding Logic
+    # 4. Dynamic Sharding Logic
     shard_index = int(os.environ.get("SHARD_INDEX", 0))
     total_shards = int(os.environ.get("TOTAL_SHARDS", 6)) # Defaults to 6 shards
 
@@ -161,7 +190,7 @@ async def main():
         df_to_process = meta_df
         log(f"🚀 Single run processing all {len(df_to_process)} Meta links.")
 
-    # 4. Launch Playwright
+    # 5. Launch Playwright
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context(viewport={'width': 1280, 'height': 1200})
