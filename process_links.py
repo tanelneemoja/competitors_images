@@ -16,6 +16,11 @@ BASE_DATA_DIR = "data"
 META_CONCURRENCY = 15
 GTC_TIMEOUT = 60000
 
+# GitHub Config for Looker Studio Manifest
+GITHUB_ORG = "YOUR_GITHUB_USERNAME_OR_ORG"
+REPO_NAME = "YOUR_REPO_NAME"
+MANIFEST_OUTPUT_CSV = "ad_image_manifest.csv"
+
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
@@ -74,12 +79,53 @@ def append_to_github_summary(file_path, ad_id, seq_num, shard_tag):
     except Exception:
         pass
 
+def generate_image_manifest(github_org, repo_name, output_csv=MANIFEST_OUTPUT_CSV):
+    """Scans all saved PNGs and writes an ad_id -> GitHub Pages URL manifest for BigQuery/Looker Studio."""
+    manifest_rows = []
+    
+    if not os.path.exists(BASE_DATA_DIR):
+        log("⚠️ Data directory does not exist. Skipping manifest generation.")
+        return
+
+    for root, _, files in os.walk(BASE_DATA_DIR):
+        for file in files:
+            if file.lower().endswith(".png"):
+                ad_id = os.path.splitext(file)[0]
+                advertiser_folder = os.path.basename(root)
+                
+                # Format URL for web delivery
+                encoded_advertiser = urllib.parse.quote(advertiser_folder)
+                encoded_filename = urllib.parse.quote(file)
+                
+                pages_url = f"https://{github_org}.github.io/{repo_name}/data/{encoded_advertiser}/{encoded_filename}"
+                
+                manifest_rows.append({
+                    "ad_id": ad_id,
+                    "advertiser": advertiser_folder,
+                    "image_url": pages_url,
+                    "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                })
+
+    if manifest_rows:
+        df_manifest = pd.DataFrame(manifest_rows)
+        df_manifest.to_csv(output_csv, index=False)
+        log(f"📄 Generated Looker Studio image manifest: {output_csv} ({len(df_manifest)} ads mapped)")
+    else:
+        log("⚠️ No PNG images found to include in manifest.")
+
 async def process_meta_link(context, row, seq_num, meta_sem, shard_tag):
     raw_url = str(row.get('creative_page_url', ''))
     ad_id = extract_id_from_url(raw_url)
     advertiser = sanitize_filename(row.get('advertiser', 'Unknown'))
     advertiser_dir = os.path.join(BASE_DATA_DIR, advertiser)
-    
+    save_path = os.path.join(advertiser_dir, f"{ad_id}.png")
+
+    # SKIP LOGIC: If PNG image already exists locally and is non-empty, skip navigation completely
+    if os.path.exists(save_path) and os.path.getsize(save_path) > 0:
+        log(f"⏩ [{shard_tag} | Seq: {seq_num}] SKIPPED (Already exists): {ad_id}")
+        append_to_github_summary(save_path, ad_id, seq_num, shard_tag)
+        return
+
     os.makedirs(advertiser_dir, exist_ok=True)
 
     async with meta_sem:
@@ -106,37 +152,37 @@ async def process_meta_link(context, row, seq_num, meta_sem, shard_tag):
 
             await page.wait_for_timeout(3500)
 
-            # 4. Target the isolated ad creative card without depending on hashed class names
+            # 4. Target the isolated ad creative card cleanly with fallback options
+            card_selectors = [
+                "xpath=//div[contains(., 'This ad is from a URL link') and contains(@class, 'x9f619')]",
+                "div[data-testid='ad-content-body-video-container']",
+                "div[data-testid='ad-library-dynamic-content-container']",
+                "xpath=//hr/following-sibling::div[1]",
+                "[role='dialog']"
+            ]
+
             card_locator = None
-            
-            # Selector A: Explicit data-testid container
-            dynamic_container = page.locator("div[data-testid='ad-library-dynamic-content-container']")
-            
-            # Selector B: Position-based fallback below the <hr> rule
-            hr_sibling = page.locator("xpath=//hr/following-sibling::div[1]")
+            for selector in card_selectors:
+                loc = page.locator(selector)
+                if await loc.count() > 0:
+                    candidate = loc.first
+                    try:
+                        if await candidate.is_visible():
+                            card_locator = candidate
+                            break
+                    except Exception:
+                        continue
 
-            if await dynamic_container.count() > 0 and await dynamic_container.is_visible():
-                card_locator = dynamic_container.first
-            elif await hr_sibling.count() > 0 and await hr_sibling.is_visible():
-                card_locator = hr_sibling.first
-            else:
-                # Selector C: Generic Modal Dialog Fallback
-                dialog_locator = page.locator("[role='dialog']")
-                if await dialog_locator.count() > 0 and await dialog_locator.is_visible():
-                    card_locator = dialog_locator.first
-
-            save_path = os.path.join(advertiser_dir, f"{ad_id}.png")
-
-            # 5. Capture screenshot
-            if card_locator and await card_locator.is_visible():
+            # 5. Capture PNG screenshot
+            if card_locator:
                 await card_locator.screenshot(path=save_path)
                 append_to_github_summary(save_path, ad_id, seq_num, shard_tag)
-                log(f"    📸 [{shard_tag} | Seq: {seq_num}] SAVED AD CARD: {save_path}")
+                log(f"    📸 [{shard_tag} | Seq: {seq_num}] SAVED AD CARD (PNG): {save_path}")
             else:
                 # Full page fallback if specific elements aren't isolated
                 await page.screenshot(path=save_path, full_page=True)
                 append_to_github_summary(save_path, ad_id, seq_num, shard_tag)
-                log(f"    📸 [{shard_tag} | Seq: {seq_num}] SAVED FULL PAGE FALLBACK: {save_path}")
+                log(f"    📸 [{shard_tag} | Seq: {seq_num}] SAVED FULL PAGE FALLBACK (PNG): {save_path}")
 
         except Exception as e:
             log(f"    ❌ [{shard_tag} | Seq: {seq_num}] FAIL META: {str(e)[:60]} | {raw_url}")
@@ -206,6 +252,12 @@ async def main():
         await browser.close()
         
     log(f"🏁 [{shard_tag}] PROCESSING COMPLETE.")
+
+    # 6. Generate manifest CSV for BigQuery -> Looker Studio pipeline
+    generate_image_manifest(
+        github_org=GITHUB_ORG,
+        repo_name=REPO_NAME
+    )
 
 if __name__ == "__main__":
     asyncio.run(main())
