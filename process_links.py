@@ -25,7 +25,7 @@ def sanitize_filename(name):
 
 def extract_id_from_url(url):
     """Extracts numeric ad ID from Meta archive/render URLs or standard library URLs."""
-    match = re.search(r"(?:id=|creative/|sadbundle/|simgad/)([0-9]+)", str(url))
+    match = re.search(r"(?:id=|creative/|sadbundle/|simgad/|ad_id=)([0-9]+)", str(url))
     return match.group(1) if match else "unknown"
 
 def remove_readonly(func, path, exc_info):
@@ -33,26 +33,27 @@ def remove_readonly(func, path, exc_info):
     os.chmod(path, stat.S_IWRITE)
     func(path)
 
-def reset_data_directory():
-    """Safely wipes all subdirectories and files inside 'data/' without breaking locks."""
+def prepare_data_directory(shard_index):
+    """Only clears the data directory on Shard 0 (or single-shard runs) to avoid wiping peer output."""
     if not os.path.exists(BASE_DATA_DIR):
         os.makedirs(BASE_DATA_DIR, exist_ok=True)
         log(f"✨ Created fresh '{BASE_DATA_DIR}' directory.")
         return
 
-    log(f"🧹 Clearing previous contents in '{BASE_DATA_DIR}'...")
-    for item in os.listdir(BASE_DATA_DIR):
-        item_path = os.path.join(BASE_DATA_DIR, item)
-        try:
-            if os.path.isdir(item_path):
-                shutil.rmtree(item_path, onerror=remove_readonly)
-            else:
-                os.chmod(item_path, stat.S_IWRITE)
-                os.remove(item_path)
-        except Exception as e:
-            log(f"⚠️ Could not delete {item_path}: {e}")
-
-    log(f"✨ Clean '{BASE_DATA_DIR}' directory ready.")
+    # Clear directory ONLY if we are the primary runner/Shard 0
+    if shard_index == 0:
+        log(f"🧹 [Shard 1 Init] Clearing previous contents in '{BASE_DATA_DIR}'...")
+        for item in os.listdir(BASE_DATA_DIR):
+            item_path = os.path.join(BASE_DATA_DIR, item)
+            try:
+                if os.path.isdir(item_path):
+                    shutil.rmtree(item_path, onerror=remove_readonly)
+                else:
+                    os.chmod(item_path, stat.S_IWRITE)
+                    os.remove(item_path)
+            except Exception as e:
+                log(f"⚠️ Could not delete {item_path}: {e}")
+        log(f"✨ Clean '{BASE_DATA_DIR}' directory ready.")
 
 def append_to_github_summary(file_path, ad_id, seq_num, shard_tag):
     """Appends an embedded thumbnail directly into the GitHub Actions Job Summary UI."""
@@ -106,34 +107,37 @@ async def process_meta_link(context, row, seq_num, meta_sem, shard_tag):
 
             await page.wait_for_timeout(3500)
 
-           # 4. Target the isolated ad creative card without depending on hashed class names
+            # 4. Target the isolated ad creative card without depending on hashed class names
             card_locator = None
             
-            # Selector 1: Stable, explicit data-testid attribute for the creative wrapper
+            # Selector A: Explicit data-testid container
             dynamic_container = page.locator("div[data-testid='ad-library-dynamic-content-container']")
             
+            # Selector B: Position-based fallback below the <hr> rule
+            hr_sibling = page.locator("xpath=//hr/following-sibling::div[1]")
+
             if await dynamic_container.count() > 0 and await dynamic_container.is_visible():
                 card_locator = dynamic_container.first
+            elif await hr_sibling.count() > 0 and await hr_sibling.is_visible():
+                card_locator = hr_sibling.first
             else:
-                # Selector 2: Anchor to the 'Sponsored' text node and walk up to its main container box
-                # Finds the ancestor container right below the <hr> divider / metadata section
-                sponsored_node = page.locator("text='Sponsored'").first
-                if await sponsored_node.count() > 0:
-                    # XPath explanation:
-                    # - Tries finding data-testid parent first
-                    # - Fallback: steps up to the div immediately following the horizontal rule (<hr>)
-                    card_locator = sponsored_node.locator(
-                        "xpath=ancestor::div[@data-testid='ad-library-dynamic-content-container'] | "
-                        "ancestor::hr/following-sibling::div[1]"
-                    ).first
+                # Selector C: Generic Modal Dialog Fallback
+                dialog_locator = page.locator("[role='dialog']")
+                if await dialog_locator.count() > 0 and await dialog_locator.is_visible():
+                    card_locator = dialog_locator.first
 
             save_path = os.path.join(advertiser_dir, f"{ad_id}.png")
 
-            # 5. Capture screenshot
+            # 5. Capture screenshot (Overwrites existing file on disk)
             if card_locator and await card_locator.is_visible():
                 await card_locator.screenshot(path=save_path)
                 append_to_github_summary(save_path, ad_id, seq_num, shard_tag)
-                log(f"    📸 [{shard_tag} | Seq: {seq_num}] SAVED AD CARD: {save_path}")
+                log(f"    📸 [{shard_tag} | Seq: {seq_num}] OVERWROTE AD CARD: {save_path}")
+            else:
+                # Full page fallback if specific elements aren't isolated
+                await page.screenshot(path=save_path, full_page=True)
+                append_to_github_summary(save_path, ad_id, seq_num, shard_tag)
+                log(f"    📸 [{shard_tag} | Seq: {seq_num}] OVERWROTE FULL PAGE FALLBACK: {save_path}")
 
         except Exception as e:
             log(f"    ❌ [{shard_tag} | Seq: {seq_num}] FAIL META: {str(e)[:60]} | {raw_url}")
@@ -145,19 +149,29 @@ async def main():
         log(f"❌ Input CSV file '{CSV_FILE}' not found.")
         return
 
-    # 1. Reset local data directory at start
-    reset_data_directory()
+    # 1. Determine shard environment variables first
+    shard_index = int(os.environ.get("SHARD_INDEX", 0))
+    total_shards = int(os.environ.get("TOTAL_SHARDS", 6))
 
-    # 2. Read CSV and filter ONLY Meta links
+    if shard_index >= total_shards:
+        total_shards = shard_index + 1
+
+    shard_tag = f"Shard {shard_index + 1}/{total_shards}"
+
+    # 2. Reset/Prepare data directory safely
+    prepare_data_directory(shard_index)
+
+    # 3. Read CSV and filter Meta links
     full_df = pd.read_csv(CSV_FILE)
     
+    # Relaxed mask: matches facebook.com ad links, fb.me links, or creative URLs
     meta_mask = full_df['creative_page_url'].astype(str).str.contains(
-        r"facebook\.com/ads/(?:library|archive)", case=False, na=False
+        r"facebook\.com|fb\.me", case=False, na=False
     )
     meta_df = full_df[meta_mask].copy()
     
     if len(meta_df) == 0:
-        log("⚠️ No Meta links found matching 'facebook.com/ads/library' or 'facebook.com/ads/archive'. Exiting.")
+        log("⚠️ No Meta links matching 'facebook.com' or 'fb.me' found. Exiting.")
         return
 
     # ------------------------------------------------------------------
@@ -170,15 +184,7 @@ async def main():
     # Assign persistent global index (1 to N)
     meta_df['global_seq'] = range(1, len(meta_df) + 1)
 
-    # 3. Dynamic Sharding Logic
-    shard_index = int(os.environ.get("SHARD_INDEX", 0))
-    total_shards = int(os.environ.get("TOTAL_SHARDS", 6))
-
-    if shard_index >= total_shards:
-        total_shards = shard_index + 1
-
-    shard_tag = f"Shard {shard_index + 1}/{total_shards}"
-    
+    # 4. Dynamic Sharding Execution
     if total_shards > 1:
         shards = np.array_split(meta_df, total_shards)
         df_to_process = shards[shard_index]
@@ -194,7 +200,7 @@ async def main():
         df_to_process = meta_df
         log(f"🚀 Processing all {len(df_to_process)} test Meta links.")
 
-    # 4. Launch Playwright
+    # 5. Launch Playwright
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context(viewport={'width': 1280, 'height': 1200})
