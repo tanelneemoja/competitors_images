@@ -63,22 +63,55 @@ async def process_meta_link(context, row, seq_num, meta_sem, shard_tag):
         log(f"🔍 [{shard_tag} | Seq: {seq_num}] START META: {ad_id} | Advertiser: {advertiser}")
         page = await context.new_page()
         try:
+            # 1. Navigate to ad link
             await page.goto(raw_url, wait_until="domcontentloaded", timeout=GTC_TIMEOUT)
-            
+
+            # 2. Wait for modal or structural ad element using stable identifiers
             try:
-                await page.wait_for_selector("div[role='article'], ._8n-a, body", timeout=15000)
+                await page.wait_for_selector(
+                    "text=This ad is from a URL link, [role='dialog'], [role='article'], [data-testid='ad-library-dynamic-content-container']",
+                    timeout=20000
+                )
             except Exception:
                 pass
+
+            # 3. Wait out the loading state and spinners
+            try:
+                await page.wait_for_selector("text=Loading...", state="detached", timeout=10000)
+            except Exception:
+                pass
+
+            # Buffer for high-res creative assets to complete rendering
+            await page.wait_for_timeout(3500)
+
+            # 4. Target STABLE structural containers (ignores obfuscated class names)
+            card_locator = None
             
-            meta_target = page.locator("div[role='article'], ._8n-a").first
-            if await meta_target.count() > 0:
-                save_path = os.path.join(advertiser_dir, f"{ad_id}.png")
-                await meta_target.screenshot(path=save_path)
-                log(f"    📸 [{shard_tag} | Seq: {seq_num}] SAVED META: {save_path}")
+            modal_card = page.locator("[role='dialog']").filter(has=page.locator("text=This ad is from a URL link"))
+            dynamic_container = page.locator("[data-testid='ad-library-dynamic-content-container']")
+            article_card = page.locator("[role='article']")
+
+            if await modal_card.count() > 0 and await modal_card.first.is_visible():
+                inner_card = modal_card.first.locator("div").filter(has_text="Sponsored").first
+                if await inner_card.count() > 0 and await inner_card.is_visible():
+                    card_locator = inner_card
+                else:
+                    card_locator = modal_card.first
+            elif await dynamic_container.count() > 0 and await dynamic_container.first.is_visible():
+                card_locator = dynamic_container.first
+            elif await article_card.count() > 0 and await article_card.first.is_visible():
+                card_locator = article_card.first
+
+            save_path = os.path.join(advertiser_dir, f"{ad_id}.png")
+
+            # 5. Capture isolated ad card screenshot
+            if card_locator:
+                await card_locator.screenshot(path=save_path)
+                log(f"    📸 [{shard_tag} | Seq: {seq_num}] SAVED AD CARD: {save_path}")
             else:
-                save_path = os.path.join(advertiser_dir, f"{ad_id}_full.png")
                 await page.screenshot(path=save_path)
-                log(f"    📸 [{shard_tag} | Seq: {seq_num}] SAVED FALLBACK: {save_path}")
+                log(f"    📸 [{shard_tag} | Seq: {seq_num}] SAVED FALLBACK VIEWPORT: {save_path}")
+
         except Exception as e:
             log(f"    ❌ [{shard_tag} | Seq: {seq_num}] FAIL META: {str(e)[:60]} | {raw_url}")
         finally:
