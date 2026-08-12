@@ -10,7 +10,7 @@ import numpy as np
 import base64
 
 # --- CONFIGURATION ---
-CSV_FILE = "meta_links.csv"
+CSV_FILE = "BALLZY_Table.csv"
 BASE_DATA_DIR = "data"
 META_CONCURRENCY = 15
 GTC_TIMEOUT = 60000
@@ -21,6 +21,22 @@ def log(msg):
 
 def sanitize_filename(name):
     return re.sub(r'[<>:"/\\|?*]', '', str(name or "Unknown")).strip()
+
+def get_case_insensitive_val(row, key_names, default=""):
+    """Finds a column value regardless of header casing (e.g., 'ID', 'id', 'Id')."""
+    row_dict = {str(k).strip().lower(): v for k, v in row.items()}
+    for key in key_names:
+        key_lower = key.lower()
+        if key_lower in row_dict and pd.notna(row_dict[key_lower]):
+            val = str(row_dict[key_lower]).strip()
+            if val:
+                return val
+    return default
+
+def extract_id_from_url(url):
+    """Fallback ID extractor from Meta URLs if CSV column fails."""
+    match = re.search(r"(?:id=|creative/|sadbundle/|simgad/|ad_id=)([0-9]+)", str(url))
+    return match.group(1) if match else ""
 
 def remove_readonly(func, path, exc_info):
     """Clear read-only file attributes if permission is denied during folder deletion."""
@@ -34,7 +50,6 @@ def prepare_data_directory(shard_index):
         log(f"✨ Created fresh '{BASE_DATA_DIR}' directory.")
         return
 
-    # Clear directory ONLY if we are the primary runner/Shard 0
     if shard_index == 0:
         log(f"🧹 [Shard 1 Init] Clearing previous contents in '{BASE_DATA_DIR}'...")
         for item in os.listdir(BASE_DATA_DIR):
@@ -70,14 +85,21 @@ def append_to_github_summary(file_path, ad_id, seq_num, shard_tag):
         pass
 
 async def process_meta_link(context, row, seq_num, meta_sem, shard_tag):
-    raw_url = str(row.get('ad_snapshot_url', '')).strip()
-    ad_id = str(row.get('ID', '')).strip() or "unknown"
-    advertiser = sanitize_filename(row.get('page_name', 'Unknown'))
+    # Robust case-insensitive header lookup
+    raw_url = get_case_insensitive_val(row, ['ad_snapshot_url', 'creative_page_url', 'url'])
+    ad_id = get_case_insensitive_val(row, ['id', 'ad_id', 'library_id'])
+    
+    # Fallback to URL extraction if ID column is missing/empty
+    if not ad_id or ad_id.lower() == "unknown":
+        ad_id = extract_id_from_url(raw_url) or "unknown"
+
+    advertiser_raw = get_case_insensitive_val(row, ['page_name', 'advertiser'], 'Unknown')
+    advertiser = sanitize_filename(advertiser_raw)
     
     advertiser_dir = os.path.join(BASE_DATA_DIR, advertiser)
     save_path = os.path.join(advertiser_dir, f"{ad_id}.jpg")
 
-    # SKIP LOGIC: If image exists locally and has non-zero size, skip browser processing entirely
+    # SKIP LOGIC
     if os.path.exists(save_path) and os.path.getsize(save_path) > 0:
         log(f"⏩ [{shard_tag} | Seq: {seq_num}] SKIPPED (Already exists): {ad_id}")
         append_to_github_summary(save_path, ad_id, seq_num, shard_tag)
@@ -89,16 +111,16 @@ async def process_meta_link(context, row, seq_num, meta_sem, shard_tag):
         log(f"🔍 [{shard_tag} | Seq: {seq_num}] START META: {ad_id} | Advertiser: {advertiser}")
         page = await context.new_page()
         try:
-            # Block tracking, analytics, and external heavy assets to maximize speed
+            # Block tracking scripts but allow media
             await page.route(
                 re.compile(r"(google-analytics|connect\.facebook\.net/.*signals|doubleclick|analytics)"), 
                 lambda route: route.abort()
             )
 
-            # 1. Fast Navigation
+            # 1. Navigation
             await page.goto(raw_url, wait_until="domcontentloaded", timeout=GTC_TIMEOUT)
 
-            # 2. Wait for invariant structural elements (data-testid or ARIA roles)
+            # 2. Wait for main container
             try:
                 await page.wait_for_selector(
                     "div[data-testid='ad-library-dynamic-content-container'], [role='dialog'], [role='article']",
@@ -107,7 +129,7 @@ async def process_meta_link(context, row, seq_num, meta_sem, shard_tag):
             except Exception:
                 pass
 
-            # 3. Locate card element via stable target locators
+            # 3. Locate card element
             dynamic_container = page.locator("div[data-testid='ad-library-dynamic-content-container']")
             hr_sibling = page.locator("xpath=//hr/following-sibling::div[1]")
             article_container = page.locator("[role='article']")
@@ -124,7 +146,10 @@ async def process_meta_link(context, row, seq_num, meta_sem, shard_tag):
                 if await dialog_locator.count() > 0 and await dialog_locator.is_visible():
                     card_locator = dialog_locator.first
 
-            # 4. Save JPEG Screenshot
+            # 4. Additional Rendering Pause for lazy-loaded image assets
+            await page.wait_for_timeout(3000)
+
+            # 5. Save JPEG Screenshot
             if card_locator and await card_locator.is_visible():
                 await card_locator.screenshot(path=save_path, type="jpeg", quality=80)
                 append_to_github_summary(save_path, ad_id, seq_num, shard_tag)
@@ -144,7 +169,6 @@ async def main():
         log(f"❌ Input CSV file '{CSV_FILE}' not found.")
         return
 
-    # 1. Determine shard environment variables
     shard_index = int(os.environ.get("SHARD_INDEX", 0))
     total_shards = int(os.environ.get("TOTAL_SHARDS", 6))
 
@@ -153,35 +177,39 @@ async def main():
 
     shard_tag = f"Shard {shard_index + 1}/{total_shards}"
 
-    # 2. Reset/Prepare data directory
     prepare_data_directory(shard_index)
 
-    # 3. Read CSV and filter valid snapshot URLs
     full_df = pd.read_csv(CSV_FILE)
     
-    if 'ad_snapshot_url' not in full_df.columns:
-        log("❌ Column 'ad_snapshot_url' not found in CSV headers.")
+    # Standardize column search
+    cols_lower = [str(c).strip().lower() for c in full_df.columns]
+    url_col_name = None
+    for target in ['ad_snapshot_url', 'creative_page_url', 'url']:
+        if target in cols_lower:
+            url_col_name = full_df.columns[cols_lower.index(target)]
+            break
+
+    if not url_col_name:
+        log("❌ No valid snapshot URL column found in CSV headers.")
         return
 
-    meta_mask = full_df['ad_snapshot_url'].astype(str).str.contains(
+    meta_mask = full_df[url_col_name].astype(str).str.contains(
         r"facebook\.com|fb\.me", case=False, na=False
     )
     meta_df = full_df[meta_mask].copy()
     
     if len(meta_df) == 0:
-        log("⚠️ No Meta links found in 'ad_snapshot_url'. Exiting.")
+        log("⚠️ No Meta links found in dataset. Exiting.")
         return
 
-    # Apply 20-row test limit if enabled
+    # Apply test limit
     if TEST_LIMIT and TEST_LIMIT > 0:
         meta_df = meta_df.head(TEST_LIMIT)
         log(f"🧪 [TEST MODE ACTIVE] Restricted run to first {len(meta_df)} rows.")
 
-    # Assign persistent global index (1 to N)
     meta_df['global_seq'] = range(1, len(meta_df) + 1)
     total_rows = len(meta_df)
 
-    # 4. Dynamic Sharding Execution across dataset
     if total_shards > 1:
         shards = np.array_split(meta_df, total_shards)
         df_to_process = shards[shard_index]
@@ -197,7 +225,6 @@ async def main():
         df_to_process = meta_df
         log(f"🚀 Processing all {total_rows} Meta links.")
 
-    # 5. Launch Playwright
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context(viewport={'width': 1280, 'height': 1200})
