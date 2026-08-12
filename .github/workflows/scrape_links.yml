@@ -29,17 +29,19 @@ jobs:
 
       - name: Install Dependencies
         run: |
-          pip install playwright pandas numpy
+          pip install playwright pandas numpy aiohttp
           playwright install --with-deps chromium
 
       - name: Run Scraper Shard
         env:
-          TOTAL_SHARDS: 6                  # ✅ Fixed: Matches Python env key and matrix length
-          SHARD_INDEX: ${{ matrix.shard }} # ✅ Passes 0, 1, 2, 3, 4, 5
+          TOTAL_SHARDS: 6                  # Matches Python env key and matrix length
+          SHARD_INDEX: ${{ matrix.shard }} # Passes 0, 1, 2, 3, 4, 5
           PYTHONUNBUFFERED: "1"
         run: python process_links.py
 
       - name: Upload Shard Artifact
+        # 'always()' ensures you can view screenshots even if you stop/cancel the run early
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: ads-data-${{ matrix.shard }}
