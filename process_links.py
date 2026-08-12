@@ -9,7 +9,7 @@ from datetime import datetime
 import numpy as np
 
 # --- CONFIGURATION ---
-CSV_FILE = "meta_google_ads_links(in).csv"
+CSV_FILE = "BALLZY_Table.csv"
 BASE_DATA_DIR = "data"
 META_CONCURRENCY = 15
 GTC_TIMEOUT = 60000
