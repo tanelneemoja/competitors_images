@@ -10,7 +10,7 @@ import numpy as np
 import base64
 
 # --- CONFIGURATION ---
-CSV_FILE = "meta_links.csv"
+CSV_FILE = "https://docs.google.com/spreadsheets/d/1ZnYvjyg9CvDRMhuGXXwhfKgh6SahUe_LS75XkIVUyc0/export?format=csv"
 BASE_DATA_DIR = "data"
 META_CONCURRENCY = 15
 GTC_TIMEOUT = 60000
@@ -193,10 +193,6 @@ async def process_meta_link(context, row, seq_num, meta_sem, shard_tag):
             await page.close()
 
 async def main():
-    if not os.path.exists(CSV_FILE): 
-        log(f"❌ Input CSV file '{CSV_FILE}' not found.")
-        return
-
     shard_index = int(os.environ.get("SHARD_INDEX", 0))
     total_shards = int(os.environ.get("TOTAL_SHARDS", 6))
 
@@ -207,8 +203,16 @@ async def main():
 
     prepare_data_directory(shard_index)
 
-    full_df = pd.read_csv(CSV_FILE)
-    
+    # Load data directly from the live Google Sheet
+    try:
+        log("📥 Fetching live data from Google Sheets...")
+        full_df = pd.read_csv(SHEET_CSV_URL)
+        log(f"✅ Successfully fetched {len(full_df)} rows from Google Sheets.")
+    except Exception as e:
+        log(f"❌ Failed to fetch Google Sheet data: {e}")
+        return
+
+    # Continue with your existing column matching and filtering logic...
     cols_lower = [str(c).strip().lower() for c in full_df.columns]
     url_col_name = None
     for target in ['ad_snapshot_url', 'creative_page_url', 'url']:
