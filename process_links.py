@@ -105,9 +105,8 @@ async def process_meta_link(context, row, seq_num, meta_sem, shard_tag, output_r
     file_name = f"{ad_id}.jpg"
     save_path = os.path.join(advertiser_dir, file_name)
 
-    # GitHub Pages CDN Link & Formula for Looker Studio
+    # Clean direct GitHub Pages CDN URL for BigQuery / Looker Studio
     github_pages_url = f"https://{GITHUB_USER}.github.io/{GITHUB_REPO}/{BASE_DATA_DIR}/{advertiser}/{file_name}"
-    image_formula = f'=IMAGE("{github_pages_url}")'
 
     # SKIP LOGIC
     if os.path.exists(save_path) and os.path.getsize(save_path) > 0:
@@ -116,7 +115,7 @@ async def process_meta_link(context, row, seq_num, meta_sem, shard_tag, output_r
         output_rows.append({
             "Ad ID": ad_id,
             "Advertiser": advertiser,
-            "Image": image_formula
+            "Image": github_pages_url
         })
         return
 
@@ -207,7 +206,7 @@ async def process_meta_link(context, row, seq_num, meta_sem, shard_tag, output_r
             output_rows.append({
                 "Ad ID": ad_id,
                 "Advertiser": advertiser,
-                "Image": image_formula
+                "Image": github_pages_url
             })
 
         except Exception as e:
@@ -225,6 +224,10 @@ async def main():
     shard_tag = f"Shard {shard_index + 1}/{total_shards}"
 
     prepare_data_directory(shard_index)
+
+    # Ensure results.csv exists immediately so later build steps never fail
+    if not os.path.exists(OUTPUT_CSV_FILE):
+        pd.DataFrame(columns=["Ad ID", "Advertiser", "Image"]).to_csv(OUTPUT_CSV_FILE, index=False)
 
     # Load data from local CSV
     if not os.path.exists(INPUT_CSV_FILE):
@@ -295,11 +298,14 @@ async def main():
         await asyncio.gather(*tasks)
         await browser.close()
 
-    # Generate results.csv
+    # Append output rows to results.csv
     if output_rows:
         results_df = pd.DataFrame(output_rows)
-        results_df.to_csv(OUTPUT_CSV_FILE, index=False)
-        log(f"🎉 Saved {len(output_rows)} rows to '{OUTPUT_CSV_FILE}'!")
+        header_needed = not os.path.exists(OUTPUT_CSV_FILE) or os.path.getsize(OUTPUT_CSV_FILE) == 0
+        results_df.to_csv(OUTPUT_CSV_FILE, mode='a', header=header_needed, index=False)
+        log(f"🎉 Appended {len(output_rows)} rows to '{OUTPUT_CSV_FILE}'!")
+    else:
+        log(f"⚠️ No rows were processed or captured for '{OUTPUT_CSV_FILE}'.")
         
     log(f"🏁 [{shard_tag}] PROCESSING COMPLETE.")
 
