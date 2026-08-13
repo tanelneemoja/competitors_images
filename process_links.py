@@ -91,126 +91,241 @@ def append_to_github_summary(file_path, ad_id, seq_num, shard_tag):
         pass
 
 async def process_meta_link(context, row, seq_num, meta_sem, shard_tag, output_rows):
-    raw_url = get_case_insensitive_val(row, ['ad_snapshot_url', 'creative_page_url', 'url'])
-    ad_id = get_case_insensitive_val(row, ['id', 'ad_id', 'library_id'])
-    
-    # Fallback to URL extraction if ID column is missing/empty
-    if not ad_id or ad_id.lower() == "unknown":
-        ad_id = extract_id_from_url(raw_url) or "unknown"
+    raw_url = get_case_insensitive_val(
+        row,
+        ['ad_snapshot_url', 'creative_page_url', 'url']
+    )
 
-    advertiser_raw = get_case_insensitive_val(row, ['page_name', 'advertiser'], 'Unknown')
+    ad_id = get_case_insensitive_val(
+        row,
+        ['id', 'ad_id', 'library_id']
+    )
+
+    # Fallback to URL extraction if ID column is missing
+    if not ad_id or ad_id.lower() == 'unknown':
+        ad_id = extract_id_from_url(raw_url) or 'unknown'
+
+    advertiser_raw = get_case_insensitive_val(
+        row,
+        ['page_name', 'advertiser'],
+        'Unknown'
+    )
+
     advertiser = sanitize_filename(advertiser_raw)
-    
+
     advertiser_dir = os.path.join(BASE_DATA_DIR, advertiser)
-    file_name = f"{ad_id}.jpg"
+    file_name = f'{ad_id}.jpg'
     save_path = os.path.join(advertiser_dir, file_name)
 
-    # Clean direct GitHub Pages CDN URL for BigQuery / Looker Studio
-    github_pages_url = f"https://{GITHUB_USER}.github.io/{GITHUB_REPO}/{BASE_DATA_DIR}/{advertiser}/{file_name}"
-
-    # SKIP LOGIC
-    if os.path.exists(save_path) and os.path.getsize(save_path) > 0:
-        log(f"⏩ [{shard_tag} | Seq: {seq_num}] SKIPPED (Already exists): {ad_id}")
-        append_to_github_summary(save_path, ad_id, seq_num, shard_tag)
-        output_rows.append({
-            "Ad ID": ad_id,
-            "Advertiser": advertiser,
-            "Image": github_pages_url
-        })
-        return
+    # GitHub Pages URL
+    github_pages_url = (
+        f'https://{GITHUB_USER}.github.io/'
+        f'{GITHUB_REPO}/{BASE_DATA_DIR}/{advertiser}/{file_name}'
+    )
 
     os.makedirs(advertiser_dir, exist_ok=True)
 
-    async with meta_sem:
-        log(f"🔍 [{shard_tag} | Seq: {seq_num}] START META: {ad_id} | Advertiser: {advertiser}")
-        page = await context.new_page()
+    # --------------------------------------------------
+    # FORCE OVERWRITE OLD FILE
+    # --------------------------------------------------
+    if os.path.exists(save_path):
         try:
+            os.remove(save_path)
+            log(f'🗑️ [{shard_tag} | Seq: {seq_num}] Removed old image: {file_name}')
+        except Exception as e:
+            log(f'⚠️ Could not remove old image {save_path}: {e}')
+
+    async with meta_sem:
+        log(
+            f'🔍 [{shard_tag} | Seq: {seq_num}] '
+            f'START META: {ad_id} | Advertiser: {advertiser}'
+        )
+
+        page = await context.new_page()
+
+        try:
+            # --------------------------------------------------
+            # Block unnecessary tracking requests
+            # --------------------------------------------------
             await page.route(
-                re.compile(r"(google-analytics|connect\.facebook\.net/.*signals|doubleclick|analytics)"), 
+                re.compile(
+                    r'(google-analytics|connect\\.facebook\\.net/.*signals|'
+                    r'doubleclick|analytics)'
+                ),
                 lambda route: route.abort()
             )
 
-            # 1. Navigation
-            await page.goto(raw_url, wait_until="domcontentloaded", timeout=GTC_TIMEOUT)
+            # --------------------------------------------------
+            # Open the Meta Ad Library page
+            # --------------------------------------------------
+            await page.goto(
+                raw_url,
+                wait_until='domcontentloaded',
+                timeout=GTC_TIMEOUT
+            )
 
-            # 2. Dynamic wait for primary containers (Image or Video)
-            try:
-                await page.wait_for_selector(
-                    "div[data-testid='ad-library-dynamic-content-container'], "
-                    "div[data-testid='ad-content-body-video-container'], "
-                    "[role='dialog'], [role='article']",
-                    timeout=10000
+            # Give React time to hydrate
+            await page.wait_for_timeout(2500)
+
+            # Wait until a real creative asset appears
+            await page.wait_for_selector(
+                (
+                    'img[src*="scontent"], '
+                    'img[src*="fbcdn.net"], '
+                    'video, '
+                    'div[data-testid="ad-content-body-video-container"]'
+                ),
+                timeout=15000
+            )
+
+            # Extra wait for lazy-loaded creatives
+            await page.wait_for_timeout(2000)
+
+            # --------------------------------------------------
+            # MAIN STRATEGY:
+            # Find the full ad card that contains
+            # both the stable “Library ID:” text
+            # and an image or video creative.
+            # --------------------------------------------------
+            card_locator = page.locator(
+                (
+                    'xpath=//*[contains(text(), "Library ID:")]'
+                    '/ancestor::div['
+                    './/img[contains(@src,"scontent")] '
+                    'or .//img[contains(@src,"fbcdn.net")] '
+                    'or .//video'
+                    '][1]'
                 )
-            except Exception:
-                pass
+            ).first
 
-            # 3. Wait for video poster / image assets to fully render
-            await page.wait_for_timeout(3500)
+            if await card_locator.count() > 0 and await card_locator.is_visible():
 
-            # 4. Check primary container testid first
-            primary_locator = page.locator("div[data-testid='ad-library-dynamic-content-container']").first
-
-            if await primary_locator.count() > 0 and await primary_locator.is_visible():
-                await primary_locator.screenshot(path=save_path, type="jpeg", quality=80)
-                append_to_github_summary(save_path, ad_id, seq_num, shard_tag)
-                log(f"    📸 [{shard_tag} | Seq: {seq_num}] SAVED AD CARD (JPG): {save_path}")
-            else:
-                # 5. Robust Fallback: Locates full card parent wrapping Header, Video/Image & CTA
-                card_locator = page.locator(
-                    "xpath=//*[contains(text(), 'Library ID:')]/ancestor::div["
-                    ".//video or .//div[@data-testid='ad-content-body-video-container'] or .//a[contains(@href, 'l.facebook.com')]"
-                    "][last()]"
+                assets_heading = page.locator(
+                    'xpath=//*[contains(text(), '
+                    '"Additional assets from this ad")]'
                 ).first
 
-                if await card_locator.count() == 0 or not await card_locator.is_visible():
-                    card_locator = page.locator("xpath=//*[contains(text(), 'Library ID:')]/ancestor::div[2]").first
+                card_box = await card_locator.bounding_box()
 
-                assets_heading = page.locator("xpath=//*[contains(text(), 'Additional assets from this ad')]").first
+                if (
+                    await assets_heading.count() > 0
+                    and await assets_heading.is_visible()
+                ):
+                    heading_box = await assets_heading.bounding_box()
 
-                if await card_locator.count() > 0 and await card_locator.is_visible():
-                    card_box = await card_locator.bounding_box()
+                    if (
+                        card_box
+                        and heading_box
+                        and heading_box['y'] > card_box['y'] + 100
+                    ):
+                        # Crop before the extra assets section
+                        await page.screenshot(
+                            path=save_path,
+                            type='jpeg',
+                            quality=90,
+                            clip={
+                                'x': card_box['x'],
+                                'y': card_box['y'],
+                                'width': card_box['width'],
+                                'height': heading_box['y'] - card_box['y']
+                            }
+                        )
 
-                    # Crop out "Additional assets" section if present
-                    if assets_heading and await assets_heading.count() > 0 and await assets_heading.is_visible():
-                        heading_box = await assets_heading.bounding_box()
-
-                        if card_box and heading_box and heading_box['y'] > card_box['y']:
-                            clip_height = max(100, heading_box['y'] - card_box['y'])
-                            await page.screenshot(
-                                path=save_path,
-                                type="jpeg",
-                                quality=80,
-                                clip={
-                                    'x': card_box['x'],
-                                    'y': card_box['y'],
-                                    'width': card_box['width'],
-                                    'height': clip_height
-                                }
-                            )
-                            append_to_github_summary(save_path, ad_id, seq_num, shard_tag)
-                            log(f"    📸 [{shard_tag} | Seq: {seq_num}] SAVED CROPPED CARD (JPG): {save_path}")
-                        else:
-                            await card_locator.screenshot(path=save_path, type="jpeg", quality=80)
-                            append_to_github_summary(save_path, ad_id, seq_num, shard_tag)
-                            log(f"    📸 [{shard_tag} | Seq: {seq_num}] SAVED ANCHORED CARD (JPG): {save_path}")
                     else:
-                        await card_locator.screenshot(path=save_path, type="jpeg", quality=80)
-                        append_to_github_summary(save_path, ad_id, seq_num, shard_tag)
-                        log(f"    📸 [{shard_tag} | Seq: {seq_num}] SAVED ANCHORED CARD (JPG): {save_path}")
-                else:
-                    # Final fallback to body element
-                    await page.locator("body").screenshot(path=save_path, type="jpeg", quality=80)
-                    append_to_github_summary(save_path, ad_id, seq_num, shard_tag)
-                    log(f"    📸 [{shard_tag} | Seq: {seq_num}] SAVED BODY FALLBACK (JPG): {save_path}")
+                        await card_locator.screenshot(
+                            path=save_path,
+                            type='jpeg',
+                            quality=90
+                        )
 
+                else:
+                    await card_locator.screenshot(
+                        path=save_path,
+                        type='jpeg',
+                        quality=90
+                    )
+
+                append_to_github_summary(
+                    save_path,
+                    ad_id,
+                    seq_num,
+                    shard_tag
+                )
+
+                log(
+                    f'    📸 [{shard_tag} | Seq: {seq_num}] '
+                    f'SAVED FULL AD CARD: {save_path}'
+                )
+
+            else:
+                # --------------------------------------------------
+                # FALLBACK 1:
+                # Capture the visible creative image itself
+                # --------------------------------------------------
+                creative = page.locator(
+                    'img[src*="scontent.ft"], '
+                    'img[src*="fbcdn.net"]'
+                ).last
+
+                if await creative.count() > 0 and await creative.is_visible():
+
+                    await creative.screenshot(
+                        path=save_path,
+                        type='jpeg',
+                        quality=90
+                    )
+
+                    append_to_github_summary(
+                        save_path,
+                        ad_id,
+                        seq_num,
+                        shard_tag
+                    )
+
+                    log(
+                        f'    📸 [{shard_tag} | Seq: {seq_num}] '
+                        f'SAVED CREATIVE ONLY: {save_path}'
+                    )
+
+                else:
+                    # --------------------------------------------------
+                    # FALLBACK 2:
+                    # Capture the whole visible page
+                    # --------------------------------------------------
+                    await page.screenshot(
+                        path=save_path,
+                        full_page=True,
+                        type='jpeg',
+                        quality=80
+                    )
+
+                    append_to_github_summary(
+                        save_path,
+                        ad_id,
+                        seq_num,
+                        shard_tag
+                    )
+
+                    log(
+                        f'    📸 [{shard_tag} | Seq: {seq_num}] '
+                        f'SAVED PAGE FALLBACK: {save_path}'
+                    )
+
+            # --------------------------------------------------
+            # Save output row
+            # --------------------------------------------------
             output_rows.append({
-                "Ad ID": ad_id,
-                "Advertiser": advertiser,
-                "Image": github_pages_url
+                'Ad ID': ad_id,
+                'Advertiser': advertiser,
+                'Image': github_pages_url
             })
 
         except Exception as e:
-            log(f"    ❌ [{shard_tag} | Seq: {seq_num}] FAIL META: {str(e)[:60]} | {raw_url}")
+            log(
+                f'    ❌ [{shard_tag} | Seq: {seq_num}] '
+                f'FAIL META: {str(e)[:80]} | {raw_url}'
+            )
+
         finally:
             await page.close()
 
@@ -288,7 +403,7 @@ async def main():
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context(viewport={'width': 1280, 'height': 1200})
+        context = await browser.new_context( viewport={'width': 1400, 'height': 1600}, device_scale_factor=1.5 )
         meta_sem = asyncio.Semaphore(META_CONCURRENCY)
         
         tasks = [
