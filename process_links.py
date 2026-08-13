@@ -55,10 +55,6 @@ def sanitize_filename(name):
 def get_case_insensitive_val(row, key_names, default=""):
     """
     Finds a column value regardless of header casing.
-    Example:
-        ID
-        id
-        Id
     """
 
     row_dict = {
@@ -85,7 +81,7 @@ def get_case_insensitive_val(row, key_names, default=""):
 
 def extract_id_from_url(url):
     """
-    Fallback ID extractor from Meta URLs if CSV column fails.
+    Fallback ID extractor from Meta URLs.
     """
 
     match = re.search(
@@ -98,80 +94,102 @@ def extract_id_from_url(url):
 
 def remove_readonly(func, path, exc_info):
     """
-    Clear read-only file attributes if permission is denied
-    during folder deletion.
+    Clears read-only attributes if deletion fails.
     """
 
-    os.chmod(path, stat.S_IWRITE)
-    func(path)
+    try:
+        os.chmod(path, stat.S_IWRITE)
+        func(path)
+    except Exception:
+        pass
 
 
 # ============================================================
-# DATA DIRECTORY
+# CLEAN SHARD WORKSPACE
 # ============================================================
 
-def prepare_data_directory(shard_index):
+def prepare_shard_workspace(shard_index):
     """
-    Only clears the data directory on Shard 0
-    (or single-shard runs) to avoid wiping peer output.
+    IMPORTANT:
+
+    Every GitHub Actions shard gets its own isolated checkout.
+
+    Therefore EVERY shard must start with an empty data/
+    directory and an empty results.csv.
+
+    We do NOT rely on Shard 0 anymore.
     """
 
-    if not os.path.exists(BASE_DATA_DIR):
+    log(
+        f"🧹 [{shard_index + 1}] "
+        f"Cleaning shard workspace..."
+    )
 
-        os.makedirs(
-            BASE_DATA_DIR,
-            exist_ok=True
-        )
+    # --------------------------------------------------------
+    # Delete data directory
+    # --------------------------------------------------------
 
-        log(
-            f"✨ Created fresh '{BASE_DATA_DIR}' directory."
-        )
+    if os.path.exists(BASE_DATA_DIR):
 
-        return
+        try:
 
-    if shard_index == 0:
-
-        log(
-            f"🧹 [Shard 1 Init] "
-            f"Clearing previous contents in "
-            f"'{BASE_DATA_DIR}'..."
-        )
-
-        for item in os.listdir(BASE_DATA_DIR):
-
-            item_path = os.path.join(
+            shutil.rmtree(
                 BASE_DATA_DIR,
-                item
+                onerror=remove_readonly
             )
 
-            try:
+            log(
+                f"    🗑️ Removed old '{BASE_DATA_DIR}/'"
+            )
 
-                if os.path.isdir(item_path):
+        except Exception as e:
 
-                    shutil.rmtree(
-                        item_path,
-                        onerror=remove_readonly
-                    )
+            log(
+                f"    ⚠️ Could not fully remove "
+                f"'{BASE_DATA_DIR}/': {e}"
+            )
 
-                else:
+    # --------------------------------------------------------
+    # Recreate empty data directory
+    # --------------------------------------------------------
 
-                    os.chmod(
-                        item_path,
-                        stat.S_IWRITE
-                    )
+    os.makedirs(
+        BASE_DATA_DIR,
+        exist_ok=True
+    )
 
-                    os.remove(item_path)
+    # --------------------------------------------------------
+    # Delete existing results.csv
+    # --------------------------------------------------------
 
-            except Exception as e:
+    if os.path.exists(OUTPUT_CSV_FILE):
 
-                log(
-                    f"⚠️ Could not delete "
-                    f"{item_path}: {e}"
-                )
+        try:
 
-        log(
-            f"✨ Clean '{BASE_DATA_DIR}' directory ready."
-        )
+            os.chmod(
+                OUTPUT_CSV_FILE,
+                stat.S_IWRITE
+            )
+
+            os.remove(
+                OUTPUT_CSV_FILE
+            )
+
+            log(
+                f"    🗑️ Removed old '{OUTPUT_CSV_FILE}'"
+            )
+
+        except Exception as e:
+
+            log(
+                f"    ⚠️ Could not remove "
+                f"'{OUTPUT_CSV_FILE}': {e}"
+            )
+
+    log(
+        f"✨ [{shard_index + 1}] "
+        f"Clean shard workspace ready."
+    )
 
 
 # ============================================================
@@ -185,8 +203,7 @@ def append_to_github_summary(
     shard_tag
 ):
     """
-    Appends an embedded thumbnail directly into
-    the GitHub Actions Job Summary UI.
+    Adds screenshot preview to GitHub Actions summary.
     """
 
     summary_file = os.environ.get(
@@ -240,7 +257,7 @@ def append_to_github_summary(
 async def creative_exists_in_element(element):
     """
     Checks whether an element contains an actual Meta
-    creative rather than only layout/text.
+    creative.
     """
 
     try:
@@ -268,6 +285,7 @@ async def creative_exists_in_element(element):
         )
 
     except Exception:
+
         return False
 
 
@@ -276,29 +294,6 @@ async def creative_exists_in_element(element):
 # ============================================================
 
 async def get_ad_card(page):
-    """
-    Finds the actual Meta Ad Library card.
-
-    Strategy:
-
-        Library ID
-             +
-        creative
-             +
-        reasonable dimensions
-             ↓
-        smallest valid ancestor
-
-    This deliberately avoids Facebook generated CSS classes.
-    """
-
-    # --------------------------------------------------------
-    # STEP 1
-    # Find an element containing an actual Library ID.
-    #
-    # Using innerText rather than exact text nodes makes this
-    # more tolerant of Meta's nested markup.
-    # --------------------------------------------------------
 
     library_candidates = page.locator(
         """
@@ -319,12 +314,6 @@ async def get_ad_card(page):
 
         return None
 
-    # --------------------------------------------------------
-    # STEP 2
-    # Examine each Library ID candidate.
-    # Usually the first/visible one is the relevant one.
-    # --------------------------------------------------------
-
     for library_index in range(library_count):
 
         library = library_candidates.nth(
@@ -337,17 +326,8 @@ async def get_ad_card(page):
                 continue
 
         except Exception:
-            continue
 
-        # ----------------------------------------------------
-        # STEP 3
-        # Find every DIV ancestor containing a creative.
-        #
-        # We intentionally do NOT use [1] here.
-        #
-        # We want to inspect all ancestors and choose the
-        # smallest useful container ourselves.
-        # ----------------------------------------------------
+            continue
 
         candidates = library.locator(
             """
@@ -379,11 +359,6 @@ async def get_ad_card(page):
         best_candidate = None
         best_area = None
 
-        # ----------------------------------------------------
-        # STEP 4
-        # Examine every candidate.
-        # ----------------------------------------------------
-
         for i in range(candidate_count):
 
             candidate = candidates.nth(i)
@@ -401,49 +376,26 @@ async def get_ad_card(page):
                 width = box["width"]
                 height = box["height"]
 
-                # --------------------------------------------
-                # Ignore tiny elements.
-                # --------------------------------------------
-
                 if width < 250:
                     continue
 
                 if height < 250:
                     continue
 
-                # --------------------------------------------
-                # Reject page-level containers.
-                #
-                # Your viewport is 1400px wide, so anything
-                # approaching the entire viewport is almost
-                # certainly not the ad card.
-                # --------------------------------------------
-
                 if width > 1200:
                     continue
-
-                # --------------------------------------------
-                # Reject huge page sections.
-                # --------------------------------------------
 
                 if height > 3000:
                     continue
 
-                # --------------------------------------------
-                # Make absolutely sure this candidate actually
-                # contains a creative.
-                # --------------------------------------------
-
-                has_creative = await creative_exists_in_element(
-                    candidate
+                has_creative = (
+                    await creative_exists_in_element(
+                        candidate
+                    )
                 )
 
                 if not has_creative:
                     continue
-
-                # --------------------------------------------
-                # Make sure it still contains Library ID.
-                # --------------------------------------------
 
                 contains_library_id = await candidate.evaluate(
                     """
@@ -460,10 +412,6 @@ async def get_ad_card(page):
 
                 area = width * height
 
-                # --------------------------------------------
-                # Smallest valid container wins.
-                # --------------------------------------------
-
                 if (
                     best_candidate is None
                     or area < best_area
@@ -473,6 +421,7 @@ async def get_ad_card(page):
                     best_area = area
 
             except Exception:
+
                 continue
 
         if best_candidate is not None:
@@ -497,15 +446,10 @@ async def get_ad_card(page):
 
 
 # ============================================================
-# CLEAN AD CARD VISUALLY BEFORE SCREENSHOT
+# PREPARE CARD
 # ============================================================
 
 async def prepare_card_for_screenshot(card):
-    """
-    Forces the actual ad card to have a clean white
-    background and removes visual effects that could
-    introduce surrounding page/background artifacts.
-    """
 
     try:
 
@@ -541,15 +485,6 @@ async def prepare_card_for_screenshot(card):
 # ============================================================
 
 async def wait_for_creative(page):
-    """
-    Waits for a real creative to appear.
-
-    Supports:
-        - standard images
-        - Meta CDN images
-        - video
-        - carousel
-    """
 
     selectors = (
         'img[src*="s600x600"], '
@@ -585,12 +520,6 @@ async def screenshot_ad_card(
     card,
     save_path
 ):
-    """
-    Takes the screenshot of the actual ad card.
-
-    If 'Additional assets from this ad' exists below
-    the card, crop before that section.
-    """
 
     await prepare_card_for_screenshot(card)
 
@@ -601,10 +530,6 @@ async def screenshot_ad_card(
         raise Exception(
             "Ad card has no bounding box."
         )
-
-    # --------------------------------------------------------
-    # Find Additional assets section.
-    # --------------------------------------------------------
 
     assets_heading = page.locator(
         """
@@ -629,7 +554,6 @@ async def screenshot_ad_card(
                 - card_box["y"]
             )
 
-            # Only use the crop if it makes sense.
             if (
                 crop_height > 100
                 and crop_height < card_box["height"]
@@ -649,10 +573,6 @@ async def screenshot_ad_card(
 
                 return "FULL AD CARD / CROPPED"
 
-    # --------------------------------------------------------
-    # Normal element screenshot.
-    # --------------------------------------------------------
-
     await card.screenshot(
         path=save_path,
         type="jpeg",
@@ -671,10 +591,6 @@ async def screenshot_creative_fallback(
     page,
     save_path
 ):
-    """
-    Last useful fallback:
-    screenshot the largest visible creative.
-    """
 
     creative_candidates = page.locator(
         """
@@ -717,9 +633,11 @@ async def screenshot_creative_fallback(
                 best_area = area
 
         except Exception:
+
             continue
 
     if best is None:
+
         return False
 
     await best.screenshot(
@@ -765,13 +683,14 @@ async def process_meta_link(
     )
 
     # --------------------------------------------------------
-    # Fallback ID extraction
+    # Fallback ID
     # --------------------------------------------------------
 
     if (
         not ad_id
         or ad_id.lower() == "unknown"
     ):
+
         ad_id = (
             extract_id_from_url(raw_url)
             or "unknown"
@@ -803,7 +722,7 @@ async def process_meta_link(
     )
 
     # --------------------------------------------------------
-    # GitHub Pages URL WITH CACHE BUSTING
+    # CACHE-BUSTED GITHUB URL
     # --------------------------------------------------------
 
     github_pages_url = (
@@ -820,14 +739,21 @@ async def process_meta_link(
         f"IMAGE URL: {github_pages_url}"
     )
 
+    # --------------------------------------------------------
+    # Ensure advertiser folder exists
+    # --------------------------------------------------------
+
     os.makedirs(
         advertiser_dir,
         exist_ok=True
     )
 
-    # ========================================================
-    # FORCE OVERWRITE OLD FILE
-    # ========================================================
+    # --------------------------------------------------------
+    # Remove existing image
+    #
+    # Normally unnecessary because shard workspace is empty,
+    # but this makes the function itself safe.
+    # --------------------------------------------------------
 
     if os.path.exists(save_path):
 
@@ -864,7 +790,7 @@ async def process_meta_link(
         try:
 
             # ------------------------------------------------
-            # Block unnecessary tracking requests
+            # Block tracking
             # ------------------------------------------------
 
             await page.route(
@@ -878,7 +804,7 @@ async def process_meta_link(
             )
 
             # ------------------------------------------------
-            # Open Meta Ad Library
+            # Open Meta
             # ------------------------------------------------
 
             await page.goto(
@@ -888,7 +814,7 @@ async def process_meta_link(
             )
 
             # ------------------------------------------------
-            # Give React time to hydrate
+            # React hydration
             # ------------------------------------------------
 
             await page.wait_for_timeout(2500)
@@ -904,34 +830,36 @@ async def process_meta_link(
             if not creative_found:
 
                 log(
-                    f"    ⚠️ [{shard_tag} | Seq: {seq_num}] "
+                    f"    ⚠️ "
+                    f"[{shard_tag} | Seq: {seq_num}] "
                     f"No obvious creative selector found. "
                     f"Continuing with Library ID detection."
                 )
 
             # ------------------------------------------------
-            # Extra wait for lazy-loaded creatives
+            # Lazy load
             # ------------------------------------------------
 
             await page.wait_for_timeout(2000)
 
             # ------------------------------------------------
-            # Find actual ad card
+            # Find card
             # ------------------------------------------------
 
             card = await get_ad_card(page)
 
             # =================================================
-            # PRIMARY:
-            # FULL ACTUAL AD CARD
+            # PRIMARY: FULL CARD
             # =================================================
 
             if card is not None:
 
-                screenshot_type = await screenshot_ad_card(
-                    page,
-                    card,
-                    save_path
+                screenshot_type = (
+                    await screenshot_ad_card(
+                        page,
+                        card,
+                        save_path
+                    )
                 )
 
                 append_to_github_summary(
@@ -949,8 +877,7 @@ async def process_meta_link(
                 )
 
             # =================================================
-            # FALLBACK:
-            # LARGEST CREATIVE
+            # FALLBACK: CREATIVE
             # =================================================
 
             else:
@@ -969,10 +896,6 @@ async def process_meta_link(
                     )
                 )
 
-                # ---------------------------------------------
-                # Creative found
-                # ---------------------------------------------
-
                 if creative_saved:
 
                     append_to_github_summary(
@@ -989,10 +912,6 @@ async def process_meta_link(
                         f"{save_path}"
                     )
 
-                # ---------------------------------------------
-                # Nothing found → SKIP
-                # ---------------------------------------------
-
                 else:
 
                     log(
@@ -1002,10 +921,12 @@ async def process_meta_link(
                         f"Skipping empty ad."
                     )
 
+                    # IMPORTANT:
+                    # Do not add anything to output_rows.
                     return
 
             # =================================================
-            # SAVE OUTPUT ROW
+            # SAVE CURRENT RESULT
             # =================================================
 
             output_rows.append({
@@ -1041,7 +962,16 @@ async def process_meta_link(
 
 async def main():
 
-    # One cache-busting version for the entire scraper run
+    # --------------------------------------------------------
+    # GitHub Actions run version
+    #
+    # RUN_VERSION comes from:
+    #
+    # RUN_VERSION: ${{ github.run_id }}
+    #
+    # Fallback to timestamp for local testing.
+    # --------------------------------------------------------
+
     run_version = os.environ.get(
         "RUN_VERSION",
         datetime.now().strftime("%Y%m%d%H%M%S")
@@ -1050,6 +980,10 @@ async def main():
     log(
         f"🔄 Cache version: {run_version}"
     )
+
+    # --------------------------------------------------------
+    # Shard configuration
+    # --------------------------------------------------------
 
     shard_index = int(
         os.environ.get(
@@ -1077,36 +1011,17 @@ async def main():
         f"{total_shards}"
     )
 
-    # --------------------------------------------------------
-    # Prepare data directory
-    # --------------------------------------------------------
+    # ========================================================
+    # CLEAN THIS SHARD'S WORKSPACE
+    # ========================================================
 
-    prepare_data_directory(
+    prepare_shard_workspace(
         shard_index
     )
 
-    # --------------------------------------------------------
-    # Ensure results.csv exists immediately
-    # --------------------------------------------------------
-
-    if not os.path.exists(
-        OUTPUT_CSV_FILE
-    ):
-
-        pd.DataFrame(
-            columns=[
-                "Ad ID",
-                "Advertiser",
-                "Image"
-            ]
-        ).to_csv(
-            OUTPUT_CSV_FILE,
-            index=False
-        )
-
-    # --------------------------------------------------------
-    # Load input CSV
-    # --------------------------------------------------------
+    # ========================================================
+    # LOAD INPUT CSV
+    # ========================================================
 
     if not os.path.exists(
         INPUT_CSV_FILE
@@ -1145,9 +1060,9 @@ async def main():
 
         return
 
-    # --------------------------------------------------------
-    # Find URL column
-    # --------------------------------------------------------
+    # ========================================================
+    # FIND URL COLUMN
+    # ========================================================
 
     cols_lower = [
         str(c).strip().lower()
@@ -1181,9 +1096,9 @@ async def main():
 
         return
 
-    # --------------------------------------------------------
-    # Filter Meta links
-    # --------------------------------------------------------
+    # ========================================================
+    # FILTER META LINKS
+    # ========================================================
 
     meta_mask = (
         full_df[url_col_name]
@@ -1208,9 +1123,9 @@ async def main():
 
         return
 
-    # --------------------------------------------------------
-    # Test limit
-    # --------------------------------------------------------
+    # ========================================================
+    # TEST LIMIT
+    # ========================================================
 
     if (
         TEST_LIMIT
@@ -1227,9 +1142,9 @@ async def main():
             f"{len(meta_df)} rows."
         )
 
-    # --------------------------------------------------------
-    # Global sequence numbers
-    # --------------------------------------------------------
+    # ========================================================
+    # GLOBAL SEQUENCE
+    # ========================================================
 
     meta_df["global_seq"] = range(
         1,
@@ -1238,9 +1153,9 @@ async def main():
 
     total_rows = len(meta_df)
 
-    # --------------------------------------------------------
-    # Sharding
-    # --------------------------------------------------------
+    # ========================================================
+    # SHARDING
+    # ========================================================
 
     if total_shards > 1:
 
@@ -1314,15 +1229,15 @@ async def main():
         )
 
         tasks = [
-    process_meta_link(
-        context,
-        row,
-        int(row["global_seq"]),
-        meta_sem,
-        shard_tag,
-        output_rows,
-        run_version
-    )
+            process_meta_link(
+                context,
+                row,
+                int(row["global_seq"]),
+                meta_sem,
+                shard_tag,
+                output_rows,
+                run_version
+            )
             for _, row
             in df_to_process.iterrows()
         ]
@@ -1343,35 +1258,50 @@ async def main():
             output_rows
         )
 
-        header_needed = (
-            not os.path.exists(
-                OUTPUT_CSV_FILE
+        # ----------------------------------------------------
+        # Safety deduplication inside shard
+        # ----------------------------------------------------
+
+        if "Ad ID" in results_df.columns:
+
+            results_df = results_df.drop_duplicates(
+                subset=["Ad ID"],
+                keep="last"
             )
-            or
-            os.path.getsize(
-                OUTPUT_CSV_FILE
-            ) == 0
-        )
 
         results_df.to_csv(
             OUTPUT_CSV_FILE,
-            mode="a",
-            header=header_needed,
             index=False
         )
 
         log(
-            f"🎉 Appended "
-            f"{len(output_rows)} rows "
+            f"🎉 [{shard_tag}] "
+            f"Saved "
+            f"{len(results_df)} current rows "
             f"to '{OUTPUT_CSV_FILE}'!"
         )
 
     else:
 
+        # ----------------------------------------------------
+        # Create empty CSV with headers.
+        # ----------------------------------------------------
+
+        pd.DataFrame(
+            columns=[
+                "Ad ID",
+                "Advertiser",
+                "Image"
+            ]
+        ).to_csv(
+            OUTPUT_CSV_FILE,
+            index=False
+        )
+
         log(
-            f"⚠️ No rows were processed "
-            f"or captured for "
-            f"'{OUTPUT_CSV_FILE}'."
+            f"⚠️ [{shard_tag}] "
+            f"No ads captured. "
+            f"Created empty '{OUTPUT_CSV_FILE}'."
         )
 
     log(
@@ -1385,4 +1315,5 @@ async def main():
 # ============================================================
 
 if __name__ == "__main__":
+
     asyncio.run(main())
