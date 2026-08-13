@@ -742,7 +742,8 @@ async def process_meta_link(
     seq_num,
     meta_sem,
     shard_tag,
-    output_rows
+    output_rows,
+    run_version
 ):
 
     raw_url = get_case_insensitive_val(
@@ -807,12 +808,13 @@ async def process_meta_link(
     # --------------------------------------------------------
 
     github_pages_url = (
-        f"https://{GITHUB_USER}.github.io/"
-        f"{GITHUB_REPO}/"
-        f"{BASE_DATA_DIR}/"
-        f"{advertiser}/"
-        f"{file_name}"
-    )
+    f"https://{GITHUB_USER}.github.io/"
+    f"{GITHUB_REPO}/"
+    f"{BASE_DATA_DIR}/"
+    f"{advertiser}/"
+    f"{file_name}"
+    f"?v={run_version}"
+)
 
     os.makedirs(
         advertiser_dir,
@@ -1047,6 +1049,9 @@ async def process_meta_link(
 
 async def main():
 
+      # One cache-busting version for the entire scraper run
+    run_version = datetime.now().strftime("%Y%m%d%H%M%S")
+    
     shard_index = int(
         os.environ.get(
             "SHARD_INDEX",
@@ -1310,14 +1315,15 @@ async def main():
         )
 
         tasks = [
-            process_meta_link(
-                context,
-                row,
-                int(row["global_seq"]),
-                meta_sem,
-                shard_tag,
-                output_rows
-            )
+    process_meta_link(
+        context,
+        row,
+        int(row["global_seq"]),
+        meta_sem,
+        shard_tag,
+        output_rows,
+        run_version
+    )
             for _, row
             in df_to_process.iterrows()
         ]
