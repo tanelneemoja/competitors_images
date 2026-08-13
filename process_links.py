@@ -117,7 +117,7 @@ async def process_meta_link(context, row, seq_num, meta_sem, shard_tag, output_r
     file_name = f'{ad_id}.jpg'
     save_path = os.path.join(advertiser_dir, file_name)
 
-    # GitHub Pages URL
+    # GitHub Pages URL 
     github_pages_url = (
         f'https://{GITHUB_USER}.github.io/'
         f'{GITHUB_REPO}/{BASE_DATA_DIR}/{advertiser}/{file_name}'
