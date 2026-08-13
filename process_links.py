@@ -10,7 +10,13 @@ import numpy as np
 import base64
 
 # --- CONFIGURATION ---
-SHEET_CSV_URL = "https://docs.google.com/spreadsheets/d/1ZnYvjyg9CvDRMhuGXXwhfKgh6SahUe_LS75XkIVUyc0/export?format=csv"
+INPUT_CSV_FILE = "meta_links.csv"
+OUTPUT_CSV_FILE = "results.csv"
+
+# Update these to match your GitHub repository details
+GITHUB_USER = "tanelneemoja"
+GITHUB_REPO = "competitors_images"
+
 BASE_DATA_DIR = "data"
 META_CONCURRENCY = 15
 GTC_TIMEOUT = 60000
@@ -84,7 +90,7 @@ def append_to_github_summary(file_path, ad_id, seq_num, shard_tag):
     except Exception:
         pass
 
-async def process_meta_link(context, row, seq_num, meta_sem, shard_tag):
+async def process_meta_link(context, row, seq_num, meta_sem, shard_tag, output_rows):
     raw_url = get_case_insensitive_val(row, ['ad_snapshot_url', 'creative_page_url', 'url'])
     ad_id = get_case_insensitive_val(row, ['id', 'ad_id', 'library_id'])
     
@@ -96,12 +102,22 @@ async def process_meta_link(context, row, seq_num, meta_sem, shard_tag):
     advertiser = sanitize_filename(advertiser_raw)
     
     advertiser_dir = os.path.join(BASE_DATA_DIR, advertiser)
-    save_path = os.path.join(advertiser_dir, f"{ad_id}.jpg")
+    file_name = f"{ad_id}.jpg"
+    save_path = os.path.join(advertiser_dir, file_name)
+
+    # GitHub Pages CDN Link & Formula for Looker Studio
+    github_pages_url = f"https://{GITHUB_USER}.github.io/{GITHUB_REPO}/{BASE_DATA_DIR}/{advertiser}/{file_name}"
+    image_formula = f'=IMAGE("{github_pages_url}")'
 
     # SKIP LOGIC
     if os.path.exists(save_path) and os.path.getsize(save_path) > 0:
         log(f"⏩ [{shard_tag} | Seq: {seq_num}] SKIPPED (Already exists): {ad_id}")
         append_to_github_summary(save_path, ad_id, seq_num, shard_tag)
+        output_rows.append({
+            "Ad ID": ad_id,
+            "Advertiser": advertiser,
+            "Image": image_formula
+        })
         return
 
     os.makedirs(advertiser_dir, exist_ok=True)
@@ -132,7 +148,7 @@ async def process_meta_link(context, row, seq_num, meta_sem, shard_tag):
             # 3. Wait for video poster / image assets to fully render
             await page.wait_for_timeout(3500)
 
-           # 4. Check primary container testid first
+            # 4. Check primary container testid first
             primary_locator = page.locator("div[data-testid='ad-library-dynamic-content-container']").first
 
             if await primary_locator.count() > 0 and await primary_locator.is_visible():
@@ -147,7 +163,6 @@ async def process_meta_link(context, row, seq_num, meta_sem, shard_tag):
                     "][last()]"
                 ).first
 
-                # Secondary fallback if [last()] ancestor evaluates too high
                 if await card_locator.count() == 0 or not await card_locator.is_visible():
                     card_locator = page.locator("xpath=//*[contains(text(), 'Library ID:')]/ancestor::div[2]").first
 
@@ -175,17 +190,25 @@ async def process_meta_link(context, row, seq_num, meta_sem, shard_tag):
                             )
                             append_to_github_summary(save_path, ad_id, seq_num, shard_tag)
                             log(f"    📸 [{shard_tag} | Seq: {seq_num}] SAVED CROPPED CARD (JPG): {save_path}")
-                            return
-
-                    # Full card screenshot
-                    await card_locator.screenshot(path=save_path, type="jpeg", quality=80)
-                    append_to_github_summary(save_path, ad_id, seq_num, shard_tag)
-                    log(f"    📸 [{shard_tag} | Seq: {seq_num}] SAVED ANCHORED CARD (JPG): {save_path}")
+                        else:
+                            await card_locator.screenshot(path=save_path, type="jpeg", quality=80)
+                            append_to_github_summary(save_path, ad_id, seq_num, shard_tag)
+                            log(f"    📸 [{shard_tag} | Seq: {seq_num}] SAVED ANCHORED CARD (JPG): {save_path}")
+                    else:
+                        await card_locator.screenshot(path=save_path, type="jpeg", quality=80)
+                        append_to_github_summary(save_path, ad_id, seq_num, shard_tag)
+                        log(f"    📸 [{shard_tag} | Seq: {seq_num}] SAVED ANCHORED CARD (JPG): {save_path}")
                 else:
                     # Final fallback to body element
                     await page.locator("body").screenshot(path=save_path, type="jpeg", quality=80)
                     append_to_github_summary(save_path, ad_id, seq_num, shard_tag)
                     log(f"    📸 [{shard_tag} | Seq: {seq_num}] SAVED BODY FALLBACK (JPG): {save_path}")
+
+            output_rows.append({
+                "Ad ID": ad_id,
+                "Advertiser": advertiser,
+                "Image": image_formula
+            })
 
         except Exception as e:
             log(f"    ❌ [{shard_tag} | Seq: {seq_num}] FAIL META: {str(e)[:60]} | {raw_url}")
@@ -203,16 +226,19 @@ async def main():
 
     prepare_data_directory(shard_index)
 
-    # Load data directly from the live Google Sheet
-    try:
-        log("📥 Fetching live data from Google Sheets...")
-        full_df = pd.read_csv(SHEET_CSV_URL)
-        log(f"✅ Successfully fetched {len(full_df)} rows from Google Sheets.")
-    except Exception as e:
-        log(f"❌ Failed to fetch Google Sheet data: {e}")
+    # Load data from local CSV
+    if not os.path.exists(INPUT_CSV_FILE):
+        log(f"❌ Input file '{INPUT_CSV_FILE}' not found.")
         return
 
-    # Continue with your existing column matching and filtering logic...
+    try:
+        log(f"📥 Loading data from '{INPUT_CSV_FILE}'...")
+        full_df = pd.read_csv(INPUT_CSV_FILE)
+        log(f"✅ Successfully loaded {len(full_df)} rows from {INPUT_CSV_FILE}.")
+    except Exception as e:
+        log(f"❌ Failed to read '{INPUT_CSV_FILE}': {e}")
+        return
+
     cols_lower = [str(c).strip().lower() for c in full_df.columns]
     url_col_name = None
     for target in ['ad_snapshot_url', 'creative_page_url', 'url']:
@@ -255,17 +281,25 @@ async def main():
         df_to_process = meta_df
         log(f"🚀 Processing all {total_rows} Meta links.")
 
+    output_rows = []
+
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context(viewport={'width': 1280, 'height': 1200})
         meta_sem = asyncio.Semaphore(META_CONCURRENCY)
         
         tasks = [
-            process_meta_link(context, row, int(row['global_seq']), meta_sem, shard_tag) 
+            process_meta_link(context, row, int(row['global_seq']), meta_sem, shard_tag, output_rows) 
             for _, row in df_to_process.iterrows()
         ]
         await asyncio.gather(*tasks)
         await browser.close()
+
+    # Generate results.csv
+    if output_rows:
+        results_df = pd.DataFrame(output_rows)
+        results_df.to_csv(OUTPUT_CSV_FILE, index=False)
+        log(f"🎉 Saved {len(output_rows)} rows to '{OUTPUT_CSV_FILE}'!")
         
     log(f"🏁 [{shard_tag}] PROCESSING COMPLETE.")
 
