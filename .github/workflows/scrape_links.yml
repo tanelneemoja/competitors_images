@@ -71,33 +71,114 @@ jobs:
       - name: Merge Folders and Combine CSVs
         run: |
           pip install pandas
+
+          echo "📦 Contents of downloaded artifacts:"
+          find temp_artifacts -type f | head -50
+
           mkdir -p data
-          
-          # Move images into data folder
-          find temp_artifacts/ -type d -name "data" -exec cp -rn {}/. data/ \; 2>/dev/null || true
 
-          # Python script to combine CSV fragments from all shards
+          echo "🖼️ Restoring images from artifacts..."
+
+          # Copy every shard's data folder into the repository data folder.
+          # -r = recursive
+          # -f = overwrite existing files
+          for shard_data in temp_artifacts/ads-data-*/data; do
+            if [ -d "$shard_data" ]; then
+              echo "Copying: $shard_data"
+              cp -rf "$shard_data"/. data/
+            fi
+          done
+
+          echo "📊 Combining CSV files..."
+
           python -c "
-          import os, glob, pandas as pd
+          import os
+          import glob
+          import pandas as pd
 
-          csv_files = glob.glob('temp_artifacts/**/results.csv', recursive=True)
-          if csv_files:
-              dfs = [pd.read_csv(f) for f in csv_files if os.path.getsize(f) > 0]
-              if dfs:
-                  combined_df = pd.concat(dfs, ignore_index=True).drop_duplicates(subset=['Ad ID'])
-                  combined_df.to_csv('results.csv', index=False)
-                  print(f'✅ Combined {len(combined_df)} total records into results.csv')
+          csv_files = glob.glob(
+              'temp_artifacts/**/results.csv',
+              recursive=True
+          )
+
+          print(f'Found {len(csv_files)} CSV files:')
+
+          for f in csv_files:
+              print(f'  - {f} ({os.path.getsize(f)} bytes)')
+
+          dfs = []
+
+          for f in csv_files:
+              if os.path.exists(f) and os.path.getsize(f) > 0:
+                  try:
+                      df = pd.read_csv(f)
+
+                      if not df.empty:
+                          dfs.append(df)
+                          print(f'  ✅ Loaded {len(df)} rows from {f}')
+                      else:
+                          print(f'  ⚠️ Empty CSV: {f}')
+
+                  except Exception as e:
+                      print(f'  ❌ Failed to read {f}: {e}')
+
+          if dfs:
+              combined_df = pd.concat(
+                  dfs,
+                  ignore_index=True
+              )
+
+              # Remove duplicate Ad IDs
+              if 'Ad ID' in combined_df.columns:
+                  before = len(combined_df)
+
+                  combined_df = combined_df.drop_duplicates(
+                      subset=['Ad ID'],
+                      keep='last'
+                  )
+
+                  print(
+                      f'🔄 Removed {before - len(combined_df)} duplicate Ad IDs'
+                  )
+
+              combined_df.to_csv(
+                  'results.csv',
+                  index=False
+              )
+
+              print(
+                  f'✅ Combined {len(combined_df)} total records into results.csv'
+              )
+
+          else:
+              print('⚠️ No CSV data found.')
           "
+
+          echo "📸 Images currently in repository data folder:"
+          find data -type f | wc -l
+
+          echo "📊 Results CSV:"
+          if [ -f results.csv ]; then
+            wc -l results.csv
+          fi
 
       - name: Commit and Push
         run: |
           git config --global user.name "Ad-Processor-Bot"
           git config --global user.email "actions@github.com"
-          
-          git add data/ results.csv
-          if [ -n "$(git status --porcelain data/ results.csv)" ]; then
+
+          echo "🔍 Checking changes..."
+
+          git status --short
+
+          git add -A data/ results.csv
+
+          echo "📋 Staged changes:"
+          git diff --cached --stat
+
+          if git diff --cached --quiet; then
+            echo "No new images or result rows found."
+          else
             git commit -m "Sync: Combined Ad Images & Results CSV $(date +'%Y-%m-%d')"
             git push
-          else
-            echo "No new images or result rows found."
           fi
