@@ -16,7 +16,7 @@ jobs:
       fail-fast: false
       matrix:
         shard: [0, 1, 2, 3, 4, 5]  # 6 Parallel Workers
-        
+
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -39,13 +39,14 @@ jobs:
           PYTHONUNBUFFERED: "1"
         run: python process_links.py
 
-      - name: Upload Shard Artifact
-        # 'always()' ensures you can view screenshots even if you stop/cancel the run early
+      - name: Upload Shard Artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: ads-data-${{ matrix.shard }}
-          path: data/
+          path: |
+            data/
+            results.csv
           retention-days: 1
 
   commit_results:
@@ -56,26 +57,46 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
       - name: Download All Artifacts
         uses: actions/download-artifact@v4
         with:
-          path: temp_data/
+          path: temp_artifacts/
           pattern: ads-data-*
-          merge-multiple: true
 
-      - name: Merge Folders
+      - name: Merge Folders and Combine CSVs
         run: |
           mkdir -p data
-          cp -rn temp_data/* data/ || true
+          
+          # Move images into data folder
+          find temp_artifacts/ -type d -name "data" -exec cp -rn {}/. data/ \; 2>/dev/null || true
+
+          # Python script to combine CSV fragments from all shards
+          python -c "
+          import os, glob, pandas as pd
+
+          csv_files = glob.glob('temp_artifacts/**/results.csv', recursive=True)
+          if csv_files:
+              dfs = [pd.read_csv(f) for f in csv_files if os.path.getsize(f) > 0]
+              if dfs:
+                  combined_df = pd.concat(dfs, ignore_index=True).drop_duplicates(subset=['Ad ID'])
+                  combined_df.to_csv('results.csv', index=False)
+                  print(f'✅ Combined {len(combined_df)} total records into results.csv')
+          "
 
       - name: Commit and Push
         run: |
           git config --global user.name "Ad-Processor-Bot"
           git config --global user.email "actions@github.com"
-          git add data/
-          if [ -n "$(git status --porcelain data/)" ]; then
-            git commit -m "Sync: Combined Ad Images $(date +'%Y-%m-%d')"
+          
+          git add data/ results.csv
+          if [ -n "$(git status --porcelain data/ results.csv)" ]; then
+            git commit -m "Sync: Combined Ad Images & Results CSV $(date +'%Y-%m-%d')"
             git push
           else
-            echo "No new images found."
+            echo "No new images or result rows found."
           fi
