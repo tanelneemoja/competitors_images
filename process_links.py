@@ -14,7 +14,7 @@ CSV_FILE = "meta_links.csv"
 BASE_DATA_DIR = "data"
 META_CONCURRENCY = 15
 GTC_TIMEOUT = 60000
-TEST_LIMIT = 45  # Set to None or 0 to process the full dataset
+TEST_LIMIT = 0  # Set to None or 0 to process the full dataset
 
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
