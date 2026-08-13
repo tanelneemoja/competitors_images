@@ -1041,14 +1041,16 @@ async def process_meta_link(
 
 async def main():
 
-      # One cache-busting version for the entire scraper run
+    # One cache-busting version for the entire scraper run
     run_version = os.environ.get(
-    "RUN_VERSION",
-    datetime.now().strftime("%Y%m%d%H%M%S")
-)
-     log(
+        "RUN_VERSION",
+        datetime.now().strftime("%Y%m%d%H%M%S")
+    )
+
+    log(
         f"🔄 Cache version: {run_version}"
     )
+
     shard_index = int(
         os.environ.get(
             "SHARD_INDEX",
