@@ -70,6 +70,7 @@ jobs:
 
       - name: Merge Folders and Combine CSVs
         run: |
+          pip install pandas
           mkdir -p data
           
           # Move images into data folder
