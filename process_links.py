@@ -10,7 +10,7 @@ import numpy as np
 import base64
 
 # --- CONFIGURATION ---
-SHEET_CSV_FILE = "https://docs.google.com/spreadsheets/d/1ZnYvjyg9CvDRMhuGXXwhfKgh6SahUe_LS75XkIVUyc0/export?format=csv"
+SHEET_CSV_URL = "https://docs.google.com/spreadsheets/d/1ZnYvjyg9CvDRMhuGXXwhfKgh6SahUe_LS75XkIVUyc0/export?format=csv"
 BASE_DATA_DIR = "data"
 META_CONCURRENCY = 15
 GTC_TIMEOUT = 60000
