@@ -815,7 +815,10 @@ async def process_meta_link(
     f"{file_name}"
     f"?v={run_version}"
 )
-
+log(
+    f"🔗 [{shard_tag} | Seq: {seq_num}] "
+    f"IMAGE URL: {github_pages_url}"
+)
     os.makedirs(
         advertiser_dir,
         exist_ok=True
@@ -1025,7 +1028,10 @@ async def process_meta_link(
 async def main():
 
       # One cache-busting version for the entire scraper run
-    run_version = datetime.now().strftime("%Y%m%d%H%M%S")
+    run_version = os.environ.get(
+    "RUN_VERSION",
+    datetime.now().strftime("%Y%m%d%H%M%S")
+)
     
     shard_index = int(
         os.environ.get(
