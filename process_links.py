@@ -772,7 +772,6 @@ async def process_meta_link(
         not ad_id
         or ad_id.lower() == "unknown"
     ):
-
         ad_id = (
             extract_id_from_url(raw_url)
             or "unknown"
@@ -804,21 +803,23 @@ async def process_meta_link(
     )
 
     # --------------------------------------------------------
-    # GitHub Pages URL
+    # GitHub Pages URL WITH CACHE BUSTING
     # --------------------------------------------------------
 
     github_pages_url = (
-    f"https://{GITHUB_USER}.github.io/"
-    f"{GITHUB_REPO}/"
-    f"{BASE_DATA_DIR}/"
-    f"{advertiser}/"
-    f"{file_name}"
-    f"?v={run_version}"
-)
-log(
-    f"🔗 [{shard_tag} | Seq: {seq_num}] "
-    f"IMAGE URL: {github_pages_url}"
-)
+        f"https://{GITHUB_USER}.github.io/"
+        f"{GITHUB_REPO}/"
+        f"{BASE_DATA_DIR}/"
+        f"{advertiser}/"
+        f"{file_name}"
+        f"?v={run_version}"
+    )
+
+    log(
+        f"🔗 [{shard_tag} | Seq: {seq_num}] "
+        f"IMAGE URL: {github_pages_url}"
+    )
+
     os.makedirs(
         advertiser_dir,
         exist_ok=True
@@ -927,12 +928,10 @@ log(
 
             if card is not None:
 
-                screenshot_type = (
-                    await screenshot_ad_card(
-                        page,
-                        card,
-                        save_path
-                    )
+                screenshot_type = await screenshot_ad_card(
+                    page,
+                    card,
+                    save_path
                 )
 
                 append_to_github_summary(
@@ -950,7 +949,7 @@ log(
                 )
 
             # =================================================
-            # FALLBACK 1:
+            # FALLBACK:
             # LARGEST CREATIVE
             # =================================================
 
@@ -970,6 +969,10 @@ log(
                     )
                 )
 
+                # ---------------------------------------------
+                # Creative found
+                # ---------------------------------------------
+
                 if creative_saved:
 
                     append_to_github_summary(
@@ -986,6 +989,10 @@ log(
                         f"{save_path}"
                     )
 
+                # ---------------------------------------------
+                # Nothing found → SKIP
+                # ---------------------------------------------
+
                 else:
 
                     log(
@@ -996,6 +1003,7 @@ log(
                     )
 
                     return
+
             # =================================================
             # SAVE OUTPUT ROW
             # =================================================
@@ -1005,6 +1013,12 @@ log(
                 "Advertiser": advertiser,
                 "Image": github_pages_url
             })
+
+            log(
+                f"    ✅ "
+                f"[{shard_tag} | Seq: {seq_num}] "
+                f"OUTPUT ROW ADDED: {ad_id}"
+            )
 
         except Exception as e:
 
@@ -1032,7 +1046,9 @@ async def main():
     "RUN_VERSION",
     datetime.now().strftime("%Y%m%d%H%M%S")
 )
-    
+     log(
+        f"🔄 Cache version: {run_version}"
+    )
     shard_index = int(
         os.environ.get(
             "SHARD_INDEX",
