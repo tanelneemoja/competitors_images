@@ -983,41 +983,16 @@ async def process_meta_link(
                         f"{save_path}"
                     )
 
-                # =============================================
-                # FALLBACK 2:
-                # WHOLE PAGE
-                # =============================================
-
                 else:
 
                     log(
-                        f"    ⚠️ "
+                        f"    ⏭️ "
                         f"[{shard_tag} | Seq: {seq_num}] "
-                        f"Creative fallback failed. "
-                        f"Saving full page..."
+                        f"No ad card and no creative found. "
+                        f"Skipping empty ad."
                     )
 
-                    await page.screenshot(
-                        path=save_path,
-                        full_page=True,
-                        type="jpeg",
-                        quality=80
-                    )
-
-                    append_to_github_summary(
-                        save_path,
-                        ad_id,
-                        seq_num,
-                        shard_tag
-                    )
-
-                    log(
-                        f"    📸 "
-                        f"[{shard_tag} | Seq: {seq_num}] "
-                        f"SAVED PAGE FALLBACK: "
-                        f"{save_path}"
-                    )
-
+                    return
             # =================================================
             # SAVE OUTPUT ROW
             # =================================================
