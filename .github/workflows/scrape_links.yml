@@ -23,7 +23,7 @@ jobs:
       fail-fast: false
 
       matrix:
-        shard: [0, 1, 2, 3, 4, 5]  # 6 Parallel Workers
+        shard: [0, 1, 2, 3, 4, 5]
 
     steps:
 
@@ -61,55 +61,73 @@ jobs:
         env:
           TOTAL_SHARDS: 6
           SHARD_INDEX: ${{ matrix.shard }}
-
-          # IMPORTANT:
-          # Same version for every shard in this GitHub run.
-          # Used by process_links.py for ?v= cache busting.
           RUN_VERSION: ${{ github.run_id }}
-
           PYTHONUNBUFFERED: "1"
 
         run: |
           echo "=============================================="
-          echo "🚀 Starting scraper"
+          echo "🚀 STARTING SCRAPER"
           echo "=============================================="
-          echo "Shard:       ${{ matrix.shard }}"
+          echo "Shard:        ${{ matrix.shard }}"
           echo "Total shards: 6"
-          echo "Run ID:      ${{ github.run_id }}"
+          echo "Run ID:       ${{ github.run_id }}"
           echo "=============================================="
 
           python process_links.py
 
       # ------------------------------------------------------
-      # SHOW SHARD OUTPUT
+      # SHOW SHARD RESULTS
       # ------------------------------------------------------
 
       - name: Show Shard Results
         if: always()
         run: |
+
           echo "=============================================="
           echo "📊 SHARD RESULTS"
           echo "=============================================="
 
           echo ""
-          echo "Images:"
+          echo "🖼️ Images:"
+
           if [ -d "data" ]; then
+
             find data -type f | sort | head -100
+
             echo ""
             echo "Total images:"
             find data -type f | wc -l
+
+            echo ""
+            echo "Total image size:"
+            du -sh data
+
           else
+
             echo "No data directory."
+
           fi
 
           echo ""
-          echo "CSV:"
+          echo "📊 CSV:"
+
           if [ -f "results.csv" ]; then
-            wc -l results.csv
+
+            echo "File size:"
+            du -h results.csv
+
             echo ""
+            echo "Lines:"
+            wc -l results.csv
+
+            echo ""
+            echo "First 10 rows:"
             head -10 results.csv
+
           else
+
             echo "No results.csv found."
+
           fi
 
       # ------------------------------------------------------
@@ -172,9 +190,10 @@ jobs:
           path: temp_artifacts/
           pattern: ads-data-*
 
-      # ------------------------------------------------------
-      # MERGE
-      # ------------------------------------------------------
+
+      # ======================================================
+      # MERGE CURRENT RUN
+      # ======================================================
 
       - name: Merge Folders and Combine CSVs
 
@@ -186,24 +205,27 @@ jobs:
           echo "📦 DOWNLOADED ARTIFACTS"
           echo "=============================================="
 
-          find temp_artifacts -type f | sort | head -100
+          find temp_artifacts -type f | sort | head -200
+
+          echo ""
+          echo "=============================================="
+          echo "📊 ARTIFACT CSV FILES"
+          echo "=============================================="
+
+          find temp_artifacts \
+            -name "results.csv" \
+            -type f \
+            -print
+
+
+          # ==================================================
+          # REMOVE OLD REPOSITORY DATA
+          # ==================================================
 
           echo ""
           echo "=============================================="
           echo "🧹 CLEANING OLD REPOSITORY DATA"
           echo "=============================================="
-
-          # IMPORTANT:
-          #
-          # The checkout contains the previous run's:
-          #
-          #   data/
-          #   results.csv
-          #
-          # We MUST delete both before restoring the
-          # artifacts from this run.
-          #
-          # Otherwise old images and old CSV rows survive.
 
           rm -rf data
           rm -f results.csv
@@ -213,18 +235,21 @@ jobs:
           echo "✅ Old data/ removed."
           echo "✅ Old results.csv removed."
 
+
+          # ==================================================
+          # RESTORE CURRENT RUN IMAGES
+          # ==================================================
+
           echo ""
           echo "=============================================="
           echo "🖼️ RESTORING CURRENT RUN IMAGES"
           echo "=============================================="
 
-          # Copy every shard's data folder into the
-          # completely empty repository data folder.
-
           for shard_data in temp_artifacts/ads-data-*/data; do
 
             if [ -d "$shard_data" ]; then
 
+              echo ""
               echo "Copying:"
               echo "  $shard_data"
 
@@ -232,12 +257,18 @@ jobs:
 
             else
 
+              echo ""
               echo "⚠️ No data folder found:"
               echo "  $shard_data"
 
             fi
 
           done
+
+
+          # ==================================================
+          # COMBINE CURRENT RUN CSV FILES
+          # ==================================================
 
           echo ""
           echo "=============================================="
@@ -251,7 +282,7 @@ jobs:
           import pandas as pd
 
           # --------------------------------------------------
-          # Find ONLY CSV files produced by this run
+          # Find ONLY results.csv files from artifacts
           # --------------------------------------------------
 
           csv_files = glob.glob(
@@ -265,49 +296,64 @@ jobs:
 
           for f in csv_files:
 
+              try:
+
+                  size = os.path.getsize(f)
+
+              except:
+
+                  size = 0
+
               print(
-                  f'  - {f} '
-                  f'({os.path.getsize(f)} bytes)'
+                  f'  - {f} ({size} bytes)'
               )
 
+
           # --------------------------------------------------
-          # Load CSVs
+          # Load shard CSVs
           # --------------------------------------------------
 
           dfs = []
 
           for f in csv_files:
 
-              if (
-                  os.path.exists(f)
-                  and os.path.getsize(f) > 0
-              ):
+              if not os.path.exists(f):
+                  continue
 
-                  try:
+              if os.path.getsize(f) == 0:
 
-                      df = pd.read_csv(f)
+                  print(
+                      f'  ⚠️ Empty CSV: {f}'
+                  )
 
-                      if not df.empty:
+                  continue
 
-                          dfs.append(df)
+              try:
 
-                          print(
-                              f'  ✅ Loaded '
-                              f'{len(df)} rows from {f}'
-                          )
+                  df = pd.read_csv(f)
 
-                      else:
-
-                          print(
-                              f'  ⚠️ Empty CSV: {f}'
-                          )
-
-                  except Exception as e:
+                  if df.empty:
 
                       print(
-                          f'  ❌ Failed to read '
-                          f'{f}: {e}'
+                          f'  ⚠️ No rows in: {f}'
                       )
+
+                  else:
+
+                      dfs.append(df)
+
+                      print(
+                          f'  ✅ Loaded '
+                          f'{len(df)} rows from {f}'
+                      )
+
+              except Exception as e:
+
+                  print(
+                      f'  ❌ Failed to read '
+                      f'{f}: {e}'
+                  )
+
 
           # --------------------------------------------------
           # Combine
@@ -324,6 +370,7 @@ jobs:
                   f'📊 Rows before deduplication: '
                   f'{len(combined_df)}'
               )
+
 
               # ------------------------------------------------
               # Remove duplicate Ad IDs
@@ -348,6 +395,16 @@ jobs:
                       f'{removed} duplicate Ad IDs'
                   )
 
+
+              # ------------------------------------------------
+              # Remove completely empty rows
+              # ------------------------------------------------
+
+              combined_df = combined_df.dropna(
+                  how='all'
+              )
+
+
               # ------------------------------------------------
               # Save FINAL CSV
               # ------------------------------------------------
@@ -368,7 +425,6 @@ jobs:
                   '⚠️ No CSV data found.'
               )
 
-              # Create a clean empty CSV.
               pd.DataFrame(
                   columns=[
                       'Ad ID',
@@ -386,18 +442,29 @@ jobs:
 
           "
 
+
+          # ==================================================
+          # FINAL IMAGE COUNT
+          # ==================================================
+
           echo ""
           echo "=============================================="
           echo "📸 FINAL IMAGE COUNT"
           echo "=============================================="
 
-          if [ -d data ]; then
+          if [ -d "data" ]; then
 
+            echo ""
+            echo "Image files:"
             find data -type f | sort
 
             echo ""
-            echo "Total images:"
+            echo "Total image files:"
             find data -type f | wc -l
+
+            echo ""
+            echo "Total data folder size:"
+            du -sh data
 
           else
 
@@ -405,14 +472,24 @@ jobs:
 
           fi
 
+
+          # ==================================================
+          # FINAL CSV
+          # ==================================================
+
           echo ""
           echo "=============================================="
           echo "📊 FINAL CSV"
           echo "=============================================="
 
-          if [ -f results.csv ]; then
+          if [ -f "results.csv" ]; then
 
-            echo "Rows:"
+            echo ""
+            echo "CSV size:"
+            du -h results.csv
+
+            echo ""
+            echo "CSV lines:"
             wc -l results.csv
 
             echo ""
@@ -426,11 +503,12 @@ jobs:
           fi
 
 
-      # ------------------------------------------------------
-      # VERIFY FINAL STATE
-      # ------------------------------------------------------
+      # ======================================================
+      # VERIFY FINAL OUTPUT
+      # ======================================================
 
       - name: Verify Final Output
+
         run: |
 
           echo "=============================================="
@@ -438,40 +516,121 @@ jobs:
           echo "=============================================="
 
           echo ""
-          echo "Repository data directory:"
-          du -sh data 2>/dev/null || true
+          echo "=============================================="
+          echo "📁 DATA DIRECTORY"
+          echo "=============================================="
 
-          echo ""
-          echo "Number of image files:"
-          find data -type f 2>/dev/null | wc -l
+          if [ -d "data" ]; then
 
-          echo ""
-          echo "Number of CSV rows:"
-          if [ -f results.csv ]; then
-            wc -l < results.csv
+            echo "Total size:"
+            du -sh data
+
+            echo ""
+            echo "Detailed size:"
+            du -sh data/* 2>/dev/null | sort -h
+
+            echo ""
+            echo "Number of files:"
+            find data -type f | wc -l
+
           else
-            echo "0"
+
+            echo "data/ does not exist."
+
           fi
 
+
           echo ""
-          echo "URLs containing cache version:"
-          if [ -f results.csv ]; then
-            grep -o '?v=[^,]*' results.csv | sort | uniq -c | head -20 || true
+          echo "=============================================="
+          echo "🖼️ IMAGE TYPES"
+          echo "=============================================="
+
+          if [ -d "data" ]; then
+
+            find data -type f \
+              -printf "%f\n" \
+              | sed 's/.*\.//' \
+              | sort \
+              | uniq -c
+
           fi
 
-          echo ""
-          echo "Checking for duplicate Ad IDs:"
-          if [ -f results.csv ]; then
 
+          echo ""
+          echo "=============================================="
+          echo "📊 RESULTS CSV"
+          echo "=============================================="
+
+          if [ -f "results.csv" ]; then
+
+            echo "Size:"
+            du -h results.csv
+
+            echo ""
+            echo "Lines:"
+            wc -l results.csv
+
+            echo ""
+            echo "Data rows:"
             python -c "
           import pandas as pd
 
           df = pd.read_csv('results.csv')
 
+          print(len(df))
+          "
+
+          else
+
+            echo "results.csv does not exist."
+
+          fi
+
+
+          # ==================================================
+          # CACHE VERSION CHECK
+          # ==================================================
+
+          echo ""
+          echo "=============================================="
+          echo "🔄 CACHE VERSION CHECK"
+          echo "=============================================="
+
+          if [ -f "results.csv" ]; then
+
+            grep -o '?v=[^,]*' results.csv \
+              | sort \
+              | uniq -c \
+              | head -20 || true
+
+          fi
+
+
+          # ==================================================
+          # DUPLICATE AD ID CHECK
+          # ==================================================
+
+          echo ""
+          echo "=============================================="
+          echo "🔍 DUPLICATE AD ID CHECK"
+          echo "=============================================="
+
+          if [ -f "results.csv" ]; then
+
+            python -c "
+
+          import pandas as pd
+
+          df = pd.read_csv(
+              'results.csv'
+          )
+
           if 'Ad ID' in df.columns:
 
               duplicates = df[
-                  df['Ad ID'].duplicated(keep=False)
+                  df['Ad ID'].duplicated(
+                      keep=False
+                  )
               ]
 
               if len(duplicates) > 0:
@@ -493,13 +652,116 @@ jobs:
                   print(
                       '✅ No duplicate Ad IDs.'
                   )
+
+          else:
+
+              print(
+                  '⚠️ Ad ID column not found.'
+              )
+
           "
+
           fi
 
 
-      # ------------------------------------------------------
+          # ==================================================
+          # IMAGE / CSV CONSISTENCY CHECK
+          # ==================================================
+
+          echo ""
+          echo "=============================================="
+          echo "🔗 IMAGE / CSV CONSISTENCY CHECK"
+          echo "=============================================="
+
+          python -c "
+
+          import os
+          import pandas as pd
+          import re
+
+          if not os.path.exists('results.csv'):
+
+              print(
+                  '⚠️ results.csv missing.'
+              )
+
+              raise SystemExit(0)
+
+          df = pd.read_csv(
+              'results.csv'
+          )
+
+          missing = []
+
+          for _, row in df.iterrows():
+
+              ad_id = str(
+                  row.get(
+                      'Ad ID',
+                      ''
+                  )
+              ).strip()
+
+              advertiser = str(
+                  row.get(
+                      'Advertiser',
+                      ''
+                  )
+              ).strip()
+
+              if not ad_id or not advertiser:
+                  continue
+
+              safe_advertiser = re.sub(
+                  r'[<>:\"/\\\\|?*]',
+                  '',
+                  advertiser
+              ).strip()
+
+              expected = os.path.join(
+                  'data',
+                  safe_advertiser,
+                  f'{ad_id}.jpg'
+              )
+
+              if not os.path.exists(expected):
+
+                  missing.append(
+                      expected
+                  )
+
+          print(
+              f'CSV rows checked: {len(df)}'
+          )
+
+          print(
+              f'Missing images: {len(missing)}'
+          )
+
+          if missing:
+
+              print(
+                  'First missing images:'
+              )
+
+              for item in missing[:20]:
+
+                  print(
+                      f'  ❌ {item}'
+                  )
+
+          else:
+
+              print(
+                  '✅ Every CSV row has a corresponding image.'
+              )
+
+          "
+
+
+      # ======================================================
       # COMMIT
-      # ------------------------------------------------------
+      # ======================================================
 
       - name: Commit and Push
 
@@ -508,24 +770,21 @@ jobs:
           git config --global user.name "Ad-Processor-Bot"
           git config --global user.email "actions@github.com"
 
+
           echo "=============================================="
           echo "🔍 GIT STATUS"
           echo "=============================================="
 
           git status --short
 
+
           echo ""
           echo "=============================================="
           echo "📦 STAGING"
           echo "=============================================="
 
-          # -A is intentional.
-          #
-          # Because data/ was completely rebuilt,
-          # deleted old images will also be detected
-          # and removed from the repository.
-
           git add -A data/ results.csv
+
 
           echo ""
           echo "=============================================="
@@ -533,6 +792,7 @@ jobs:
           echo "=============================================="
 
           git diff --cached --stat
+
 
           echo ""
           echo "=============================================="
